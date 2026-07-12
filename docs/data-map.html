@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>관광 데이터 커넥션 맵 — moduwa-backend</title>
+<style>
+  :root{
+    --ink:#1C2430;
+    --ink-soft:#4B5563;
+    --paper:#F1EEE6;
+    --surface:#FFFFFF;
+    --accent:#2B6E63;
+    --accent-deep:#1E4F47;
+    --accent-tint:#DEEBE7;
+    --line:#D8D2C0;
+    --line-soft:#E7E2D4;
+    --warn:#A8532A;
+    --warn-tint:#F3E2D8;
+    --blueprint:#16202B;
+    --blueprint-line:#7FB8AC;
+    --blueprint-dim:#3E4F5C;
+    --blueprint-text:#CBD8D4;
+    --font-display:"Nanum Myeongjo","Noto Serif KR","Apple SD Gothic Neo",serif;
+    --font-body:"Pretendard",-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    --font-mono:"SF Mono","JetBrains Mono",ui-monospace,"Menlo",monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--font-body);
+    font-size:16px;
+    line-height:1.7;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--accent-tint); color:var(--accent-deep);}
+
+  a{color:var(--accent-deep);}
+  a:focus-visible, button:focus-visible, summary:focus-visible{
+    outline:2px solid var(--accent); outline-offset:2px;
+  }
+
+  .wrap{max-width:1080px; margin:0 auto; padding:0 28px;}
+  .prose{max-width:720px;}
+
+  /* ── 커버 밴드 ── */
+  .cover{
+    border-bottom:1px solid var(--line);
+    padding:56px 0 36px;
+  }
+  .eyebrow{
+    font-family:var(--font-mono);
+    font-size:12px;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+    color:var(--accent-deep);
+    margin:0 0 14px;
+  }
+  h1.title{
+    font-family:var(--font-display);
+    font-weight:700;
+    font-size:38px;
+    line-height:1.25;
+    margin:0 0 10px;
+    text-wrap:balance;
+    color:var(--ink);
+  }
+  .subtitle{
+    font-size:17px;
+    color:var(--ink-soft);
+    max-width:640px;
+    margin:0 0 28px;
+  }
+  .stats{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:1px;
+    background:var(--line);
+    border:1px solid var(--line);
+  }
+  .stat{
+    background:var(--surface);
+    padding:16px 18px;
+  }
+  .stat .n{
+    font-family:var(--font-mono);
+    font-variant-numeric:tabular-nums;
+    font-size:24px;
+    font-weight:600;
+    color:var(--accent-deep);
+    display:block;
+  }
+  .stat .l{
+    font-size:13px;
+    color:var(--ink-soft);
+  }
+
+  /* ── 내비 ── */
+  nav.jump{
+    position:sticky; top:0; z-index:10;
+    background:rgba(241,238,230,.92);
+    backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line);
+  }
+  nav.jump .wrap{
+    display:flex; gap:22px; overflow-x:auto;
+    padding:12px 28px;
+  }
+  nav.jump a{
+    font-size:14px; white-space:nowrap; text-decoration:none;
+    color:var(--ink-soft); border-bottom:2px solid transparent; padding-bottom:2px;
+  }
+  nav.jump a:hover{ color:var(--accent-deep); border-color:var(--accent);}
+
+  /* ── 섹션 ── */
+  section{padding:52px 0;}
+  section + section{border-top:1px solid var(--line-soft);}
+  .section-head{
+    display:flex; align-items:baseline; gap:14px;
+    border-left:3px solid var(--accent);
+    padding-left:16px;
+    margin-bottom:8px;
+  }
+  .section-head .num{
+    font-family:var(--font-mono); font-size:13px; color:var(--accent-deep);
+  }
+  h2{
+    font-family:var(--font-display);
+    font-size:26px; font-weight:700; margin:0;
+    color:var(--ink);
+  }
+  .section-desc{
+    color:var(--ink-soft); margin:14px 0 32px; max-width:680px;
+  }
+  h3{
+    font-family:var(--font-display); font-size:18px; font-weight:700;
+    margin:0 0 6px; color:var(--ink);
+  }
+
+  /* ── 데이터 카드 그리드 ── */
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+    gap:16px;
+  }
+  .card{
+    background:var(--surface);
+    border:1px solid var(--line);
+    padding:20px 22px;
+    display:flex; flex-direction:column; gap:10px;
+  }
+  .card-top{display:flex; justify-content:space-between; align-items:flex-start; gap:10px;}
+  .card-name-kr{font-family:var(--font-display); font-weight:700; font-size:17px;}
+  .card-name-tbl{
+    font-family:var(--font-mono); font-size:12px; color:var(--ink-soft);
+    display:block; margin-top:2px;
+  }
+  .badge{
+    font-family:var(--font-mono); font-size:11px; letter-spacing:.03em;
+    padding:3px 8px; white-space:nowrap; border:1px solid currentColor;
+  }
+  .badge.ok{color:var(--accent-deep); background:var(--accent-tint); border-color:transparent;}
+  .badge.wait{color:var(--warn); background:var(--warn-tint); border-color:transparent;}
+  .card-count{
+    font-family:var(--font-mono); font-variant-numeric:tabular-nums;
+    font-size:22px; font-weight:600; color:var(--ink);
+  }
+  .card-count .u{font-size:12px; font-weight:400; color:var(--ink-soft); margin-left:4px;}
+  .card p{margin:0; font-size:14.5px; color:var(--ink-soft);}
+  .kv{margin-top:auto; padding-top:10px; border-top:1px dashed var(--line); font-size:13px;}
+  .kv div{display:flex; gap:8px; padding:2px 0;}
+  .kv .k{color:var(--ink-soft); min-width:64px; flex-shrink:0;}
+  .kv .v{font-family:var(--font-mono); font-size:12.5px; word-break:break-all;}
+  .cols{
+    display:flex; flex-wrap:wrap; gap:5px; margin-top:4px;
+  }
+  .col-chip{
+    font-family:var(--font-mono); font-size:11.5px;
+    background:var(--paper); border:1px solid var(--line-soft);
+    padding:2px 7px; color:var(--ink);
+  }
+
+  /* ── 블루프린트 다이어그램 ── */
+  .blueprint{
+    background:var(--blueprint);
+    padding:28px 8px 22px;
+    overflow-x:auto;
+  }
+  .blueprint svg{display:block; margin:0 auto; min-width:720px;}
+  .blueprint-caption{
+    text-align:center; font-family:var(--font-mono); font-size:12px;
+    color:var(--blueprint-text); opacity:.75; margin-top:10px;
+  }
+  .legend{
+    display:flex; flex-wrap:wrap; gap:18px; margin-top:18px; font-size:13px; color:var(--ink-soft);
+  }
+  .legend span{display:inline-flex; align-items:center; gap:7px;}
+  .legend i{width:22px; height:2px; display:inline-block;}
+  .legend i.solid{background:var(--accent);}
+  .legend i.dashed{background:linear-gradient(to right, var(--warn) 60%, transparent 40%); background-size:8px 2px;}
+  .legend i.formula{background:var(--ink-soft); height:2px;}
+
+  /* ── 표 ── */
+  .table-scroll{overflow-x:auto; margin:18px 0 8px;}
+  table{
+    width:100%; border-collapse:collapse; font-size:14px;
+    min-width:640px;
+  }
+  th, td{
+    text-align:left; padding:10px 12px; border-bottom:1px solid var(--line-soft);
+    vertical-align:top;
+  }
+  thead th{
+    font-family:var(--font-mono); font-size:11.5px; letter-spacing:.03em; text-transform:uppercase;
+    color:var(--ink-soft); border-bottom:1px solid var(--line);
+    background:var(--surface);
+    position:sticky; top:0;
+  }
+  tbody tr:hover{background:var(--surface);}
+  td.mono, th.mono{font-family:var(--font-mono); font-size:12.5px;}
+  .tag{
+    display:inline-block; font-family:var(--font-mono); font-size:11px;
+    padding:2px 7px;
+  }
+  .tag.exact{background:var(--accent-tint); color:var(--accent-deep);}
+  .tag.formula{background:#E7E4EC; color:#4C4570;}
+  .tag.fuzzy{background:var(--warn-tint); color:var(--warn);}
+  .tag.none{background:var(--line-soft); color:var(--ink-soft);}
+
+  /* ── 코드 블록 ── */
+  .snippet{
+    background:var(--surface); border:1px solid var(--line);
+    margin:18px 0;
+  }
+  .snippet-head{
+    display:flex; justify-content:space-between; align-items:baseline;
+    padding:10px 16px; border-bottom:1px solid var(--line-soft);
+  }
+  .snippet-head h4{margin:0; font-size:14.5px; font-family:var(--font-body); font-weight:600;}
+  .snippet-head .conf{font-family:var(--font-mono); font-size:11px;}
+  pre{
+    margin:0; padding:16px; overflow-x:auto;
+    font-family:var(--font-mono); font-size:13px; line-height:1.6;
+    color:var(--ink);
+  }
+  .snippet p.note{
+    margin:0; padding:10px 16px; font-size:13px; color:var(--ink-soft);
+    border-top:1px dashed var(--line-soft);
+  }
+  code{font-family:var(--font-mono); font-size:.92em; background:var(--paper); padding:1px 5px;}
+
+  /* ── 제약사항 리스트 ── */
+  .caveats{display:flex; flex-direction:column; gap:14px;}
+  .caveat{
+    display:flex; gap:14px; background:var(--surface); border:1px solid var(--line); padding:16px 18px;
+    border-left:3px solid var(--warn);
+  }
+  .caveat .mark{font-family:var(--font-mono); color:var(--warn); font-size:13px; flex-shrink:0; padding-top:2px;}
+  .caveat h4{margin:0 0 4px; font-size:15px;}
+  .caveat p{margin:0; font-size:14px; color:var(--ink-soft);}
+
+  footer{
+    padding:34px 0 60px; color:var(--ink-soft); font-size:13px;
+    border-top:1px solid var(--line);
+  }
+
+  @media (max-width:640px){
+    h1.title{font-size:28px;}
+    .stats{grid-template-columns:repeat(2,1fr);}
+  }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="wrap">
+    <p class="eyebrow">moduwa-backend · 내부 데이터 레퍼런스</p>
+    <h1 class="title">관광 데이터 커넥션 맵</h1>
+    <p class="subtitle">지금까지 수집한 10개 데이터 소스가 각각 무엇을 담고 있고, 서로 어떤 키로 — 그리고 얼마나 신뢰할 수 있게 — 연결되는지 정리한 기술 문서입니다.</p>
+    <div class="stats">
+      <div class="stat"><span class="n">10</span><span class="l">데이터 소스</span></div>
+      <div class="stat"><span class="n">501만+</span><span class="l">누적 레코드</span></div>
+      <div class="stat"><span class="n">25개월</span><span class="l">시계열 범위</span></div>
+      <div class="stat"><span class="n">17 / 252</span><span class="l">시도 / 시군구</span></div>
+    </div>
+  </div>
+</header>
+
+<nav class="jump">
+  <div class="wrap">
+    <a href="#datasets">01 · 데이터 소스</a>
+    <a href="#connections">02 · 연결 구조</a>
+    <a href="#matrix">03 · 키 호환성</a>
+    <a href="#joins">04 · 조인 예시</a>
+    <a href="#caveats">05 · 제약사항</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+  <!-- ════════ 01 데이터 소스 ════════ -->
+  <section id="datasets">
+    <div class="section-head"><span class="num">01</span><h2>데이터 소스</h2></div>
+    <p class="section-desc prose">9개 테이블 + 1개 참조 파일. 각 카드의 &ldquo;연결키&rdquo;가 2장 다이어그램에서 어떻게 이어지는지의 출발점입니다.</p>
+
+    <div class="cards">
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">연관관광지</span><span class="card-name-tbl">tar_rlte_records</span></div>
+          <span class="badge ok">99%</span>
+        </div>
+        <div class="card-count">3,513,910 <span class="u">행</span></div>
+        <p>관광지마다 &ldquo;함께 방문하는 곳&rdquo; 순위(최대 50위). 월별 스냅샷, 2024.05&ndash;2026.05.</p>
+        <div class="cols">
+          <span class="col-chip">t_ats_cd</span><span class="col-chip">rlte_tats_cd</span>
+          <span class="col-chip">rlte_rank</span><span class="col-chip">signgu_cd</span>
+          <span class="col-chip">base_ym</span><span class="col-chip">rlte_ctgry_*</span>
+        </div>
+        <div class="kv">
+          <div><span class="k">고유키</span><span class="v">natural_key = base_ym:signgu_cd:t_ats_cd:rlte_tats_cd</span></div>
+          <div><span class="k">자체코드</span><span class="v">t_ats_cd / rlte_tats_cd — 32자리 해시</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">기초지자체 중심 관광지</span><span class="card-name-tbl">locgo_hub_records</span></div>
+          <span class="badge ok">92%</span>
+        </div>
+        <div class="card-count">474,308 <span class="u">행</span></div>
+        <p>시군구마다 그 달의 대표(중심) 관광지 순위. 좌표 포함, 월별 스냅샷.</p>
+        <div class="cols">
+          <span class="col-chip">hub_tats_cd</span><span class="col-chip">hub_rank</span>
+          <span class="col-chip">map_x/y</span><span class="col-chip">signgu_cd</span>
+          <span class="col-chip">base_ym</span><span class="col-chip">hub_ctgry_*</span>
+        </div>
+        <div class="kv">
+          <div><span class="k">자체코드</span><span class="v">hub_tats_cd — tar_rlte와 동일 해시 공간(74.5% 코드 직접 매칭 확인)</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">전국 관광 POI</span><span class="card-name-tbl">kor_poi</span></div>
+          <span class="badge ok">완료</span>
+        </div>
+        <div class="card-count">60,695 <span class="u">행</span></div>
+        <p><code>service</code> 컬럼으로 일반(kor 50,735) / 무장애(korwith 9,960) 구분. 무장애분은 일반분의 부분집합(content_id 100% 겹침).</p>
+        <div class="cols">
+          <span class="col-chip">content_id</span><span class="col-chip">service</span>
+          <span class="col-chip">title</span><span class="col-chip">mapx/y</span>
+          <span class="col-chip">content_type_id</span><span class="col-chip">ldong_regn_cd</span>
+          <span class="col-chip">ldong_signgu_cd</span><span class="col-chip">area_code</span>
+        </div>
+        <div class="kv">
+          <div><span class="k">고유키</span><span class="v">natural_key = service:content_id</span></div>
+          <div><span class="k">유형코드</span><span class="v">12관광지·14문화시설·28레포츠·15축제·25코스·32숙박·38쇼핑·39음식점</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">관광지 상세(개요·운영시간)</span><span class="card-name-tbl">kor_detail</span></div>
+          <span class="badge wait">25%</span>
+        </div>
+        <div class="card-count">5,401 <span class="u">행</span></div>
+        <p>&ldquo;가볼 곳&rdquo; 유형(관광지·문화시설·레포츠·축제·코스, 대상 21,247건)만 우선 수집 중. 개요·운영시간 채움률 100%.</p>
+        <div class="cols">
+          <span class="col-chip">content_id (PK)</span><span class="col-chip">overview</span>
+          <span class="col-chip">homepage</span><span class="col-chip">intro_raw</span>
+        </div>
+        <div class="kv"><div><span class="k">조인</span><span class="v">kor_poi.content_id — service='kor'만</span></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">무장애 상세(접근성 28속성)</span><span class="card-name-tbl">kor_with_detail</span></div>
+          <span class="badge wait">54%</span>
+        </div>
+        <div class="card-count">5,400 <span class="u">행</span></div>
+        <p>휠체어·점자블록·장애인화장실 등 4개 그룹 28속성. 서술형 텍스트, 속성보유율 99.8%.</p>
+        <div class="cols">
+          <span class="col-chip">content_id (PK)</span><span class="col-chip">restroom</span>
+          <span class="col-chip">wheelchair</span><span class="col-chip">braileblock</span><span class="col-chip">…</span>
+        </div>
+        <div class="kv"><div><span class="k">조인</span><span class="v">kor_poi.content_id — service='korwith'만</span></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">혼잡도 예측</span><span class="card-name-tbl">tats_cnctr</span></div>
+          <span class="badge ok">완료·매일 갱신</span>
+        </div>
+        <div class="card-count">309,096 <span class="u">행</span></div>
+        <p>관광지별 향후 30일 혼잡도. <strong>고유 코드가 없고 이름(t_ats_nm)만 존재</strong> — POI 단위 조인은 이름에만 의존.</p>
+        <div class="cols">
+          <span class="col-chip">t_ats_nm</span><span class="col-chip">signgu_cd</span>
+          <span class="col-chip">base_ymd</span><span class="col-chip">cnctr_rate</span>
+        </div>
+        <div class="kv"><div><span class="k">시간단위</span><span class="v">base_ymd — 일별(다른 테이블은 대부분 월별)</span></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">방문자 빅데이터</span><span class="card-name-tbl">datalab_visitor</span></div>
+          <span class="badge ok">완료</span>
+        </div>
+        <div class="card-count">642,912 <span class="u">행</span></div>
+        <p>시도(metco)/시군구(locgo) 단위 일별 방문자수. 현지인·외지인·외국인 구분. POI 단위 아님, 지역 통계.</p>
+        <div class="cols">
+          <span class="col-chip">level</span><span class="col-chip">area_code / signgu_code</span>
+          <span class="col-chip">tou_div_cd</span><span class="col-chip">base_ymd</span>
+        </div>
+        <div class="kv"><div><span class="k">시간단위</span><span class="v">base_ymd — 일별</span></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">카카오 보완 정보</span><span class="card-name-tbl">kakao_place</span></div>
+          <span class="badge wait">대기(키 필요)</span>
+        </div>
+        <div class="card-count">0 <span class="u">행</span></div>
+        <p>전화·카테고리·카카오맵 링크로 kor_poi를 보완할 설계는 완료. REST 키 등록만 남음.</p>
+        <div class="cols">
+          <span class="col-chip">content_id (PK)</span><span class="col-chip">phone</span>
+          <span class="col-chip">place_url</span><span class="col-chip">matched</span><span class="col-chip">distance</span>
+        </div>
+        <div class="kv"><div><span class="k">조인</span><span class="v">kor_poi.content_id — 이름+좌표 fuzzy 매칭 결과</span></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">지역별 관광 다양성</span><span class="card-name-tbl">area_tar_div</span></div>
+          <span class="badge wait">미개방</span>
+        </div>
+        <div class="card-count">0 <span class="u">행</span></div>
+        <p>연령별 방문/소비/국제 다양성 지표. 제공기관이 아직 데이터를 열지 않음 — 프로브가 자동 대기 중.</p>
+        <div class="cols">
+          <span class="col-chip">operation</span><span class="col-chip">area_cd</span><span class="col-chip">base_ym</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <div><span class="card-name-kr">시군구 코드표</span><span class="card-name-tbl">sigungu-codes.json</span></div>
+          <span class="badge ok">참조용</span>
+        </div>
+        <div class="card-count">252 <span class="u">행</span></div>
+        <p>DB 테이블이 아닌 정적 참조 파일. 전 크롤러가 순회 목록으로 사용 — 지역코드↔지역명 마스터.</p>
+        <div class="cols">
+          <span class="col-chip">areaCd</span><span class="col-chip">areaNm</span>
+          <span class="col-chip">signguCd</span><span class="col-chip">signguNm</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ════════ 02 연결 구조 ════════ -->
+  <section id="connections">
+    <div class="section-head"><span class="num">02</span><h2>연결 구조 — 세 개의 좌표계</h2></div>
+    <p class="section-desc prose">가장 중요한 사실: 이 10개 소스는 <strong>하나의 통합 ID 체계</strong>를 쓰지 않습니다. 서로 다른 두 &ldquo;코드 우주&rdquo;가 있고, 그 사이는 이름 매칭으로만 이어지며, 지역 단위에서는 별도의 공통 배관(법정동 코드)이 모두를 묶습니다.</p>
+
+    <div class="blueprint">
+      <svg viewBox="0 0 1000 580" role="img" aria-labelledby="dgTitle dgDesc">
+        <title id="dgTitle">데이터 연결 구조 다이어그램</title>
+        <desc id="dgDesc">해시코드 우주와 콘텐츠ID 우주가 이름 매칭으로 연결되고, 법정동 지역코드가 하단에서 대부분의 테이블을 관통해 연결하는 구조를 보여줌</desc>
+
+        <!-- 우주 A: 해시코드 -->
+        <rect x="40" y="40" width="380" height="200" fill="none" stroke="var(--blueprint-dim)" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="58" y="66" fill="var(--blueprint-text)" font-family="SF Mono, monospace" font-size="12" letter-spacing="1">관광공사 해시 마스터코드</text>
+        <text x="58" y="82" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="10">32자리 hex · 2개 서비스 공유</text>
+
+        <rect x="64" y="102" width="150" height="56" fill="none" stroke="var(--blueprint-line)" stroke-width="1.4"/>
+        <text x="139" y="126" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="12.5" text-anchor="middle">연관관광지</text>
+        <text x="139" y="143" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="9.5" text-anchor="middle">t_ats_cd / rlte_tats_cd</text>
+
+        <rect x="266" y="102" width="150" height="56" fill="none" stroke="var(--blueprint-line)" stroke-width="1.4"/>
+        <text x="341" y="126" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="12.5" text-anchor="middle">기초지자체중심</text>
+        <text x="341" y="143" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="9.5" text-anchor="middle">hub_tats_cd</text>
+
+        <line x1="214" y1="130" x2="266" y2="130" stroke="var(--blueprint-line)" stroke-width="1.6"/>
+        <text x="240" y="122" fill="var(--blueprint-line)" font-family="SF Mono, monospace" font-size="9.5" text-anchor="middle">74.5%</text>
+
+        <text x="64" y="200" fill="var(--blueprint-dim)" font-family="Pretendard, sans-serif" font-size="11">↳ 코드가 직접 일치 — 가장 신뢰도 높은 연결</text>
+
+        <!-- 우주 B: content_id -->
+        <rect x="580" y="40" width="380" height="260" fill="none" stroke="var(--blueprint-dim)" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="598" y="66" fill="var(--blueprint-text)" font-family="SF Mono, monospace" font-size="12" letter-spacing="1">KorService2 콘텐츠ID</text>
+        <text x="598" y="82" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="10">숫자 ID · content_id</text>
+
+        <rect x="740" y="102" width="150" height="50" fill="none" stroke="var(--blueprint-line)" stroke-width="1.6"/>
+        <text x="815" y="124" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="12.5" text-anchor="middle">kor_poi</text>
+        <text x="815" y="140" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="9.5" text-anchor="middle">60,695행 (kor+korwith)</text>
+
+        <line x1="815" y1="152" x2="700" y2="192" stroke="var(--blueprint-line)" stroke-width="1.2"/>
+        <line x1="815" y1="152" x2="815" y2="192" stroke="var(--blueprint-line)" stroke-width="1.2"/>
+        <line x1="815" y1="152" x2="930" y2="192" stroke="var(--blueprint-line)" stroke-width="1.2"/>
+
+        <rect x="616" y="192" width="150" height="46" fill="none" stroke="var(--blueprint-line)" stroke-width="1.2"/>
+        <text x="691" y="212" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="11.5" text-anchor="middle">kor_detail</text>
+        <text x="691" y="227" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="9" text-anchor="middle">개요·운영시간</text>
+
+        <rect x="740" y="192" width="150" height="46" fill="none" stroke="var(--blueprint-line)" stroke-width="1.2"/>
+        <text x="815" y="212" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="11.5" text-anchor="middle">kor_with_detail</text>
+        <text x="815" y="227" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="9" text-anchor="middle">무장애 28속성</text>
+
+        <rect x="864" y="192" width="150" height="46" fill="none" stroke="var(--blueprint-dim)" stroke-width="1.2" stroke-dasharray="2 2"/>
+        <text x="939" y="212" fill="var(--blueprint-dim)" font-family="Pretendard, sans-serif" font-size="11.5" text-anchor="middle">kakao_place</text>
+        <text x="939" y="227" fill="var(--blueprint-dim)" font-family="SF Mono, monospace" font-size="9" text-anchor="middle">대기(0행)</text>
+
+        <text x="598" y="270" fill="var(--blueprint-dim)" font-family="Pretendard, sans-serif" font-size="11">↳ content_id 1:1 — 단, service별 중복 주의(아래 05)</text>
+
+        <!-- 다리: 이름 매칭 -->
+        <line x1="420" y1="140" x2="580" y2="140" stroke="#B57A55" stroke-width="1.6" stroke-dasharray="6 5"/>
+        <text x="500" y="128" fill="#C99872" font-family="SF Mono, monospace" font-size="10" text-anchor="middle">이름(텍스트) 매칭만</text>
+        <text x="500" y="160" fill="#8C6349" font-family="SF Mono, monospace" font-size="9.5" text-anchor="middle">72~82% (연관) · ~18% (기초지자체)</text>
+
+        <!-- tats_cnctr -->
+        <rect x="420" y="220" width="150" height="56" fill="none" stroke="#B57A55" stroke-width="1.2"/>
+        <text x="495" y="244" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="12" text-anchor="middle">혼잡도 예측</text>
+        <text x="495" y="261" fill="#C99872" font-family="SF Mono, monospace" font-size="9.5" text-anchor="middle">코드 없음 · 이름뿐</text>
+        <line x1="495" y1="220" x2="495" y2="158" stroke="#B57A55" stroke-width="1.2" stroke-dasharray="4 4"/>
+
+        <!-- 하단 배관: 법정동 지역코드 -->
+        <rect x="40" y="440" width="920" height="34" fill="var(--blueprint-dim)" opacity=".35"/>
+        <text x="500" y="461" fill="var(--blueprint-text)" font-family="SF Mono, monospace" font-size="12.5" text-anchor="middle" letter-spacing="1">법정동 시군구코드 (5자리) — 공용 지역 배관</text>
+
+        <line x1="139" y1="440" x2="139" y2="360" stroke="var(--blueprint-line)" stroke-width="1"/>
+        <line x1="341" y1="440" x2="341" y2="360" stroke="var(--blueprint-line)" stroke-width="1"/>
+        <line x1="495" y1="440" x2="495" y2="360" stroke="#B57A55" stroke-width="1"/>
+        <line x1="700" y1="440" x2="700" y2="360" stroke="var(--ink-soft)" stroke-width="1"/>
+
+        <rect x="620" y="330" width="160" height="30" fill="none" stroke="var(--ink-soft)" stroke-width="1"/>
+        <text x="700" y="349" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="11" text-anchor="middle">방문자수 (datalab)</text>
+
+        <line x1="815" y1="440" x2="815" y2="300" stroke="var(--ink-soft)" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="826" y="410" fill="#9AA6AE" font-family="SF Mono, monospace" font-size="9" text-anchor="start">ldong_regn_cd +</text>
+        <text x="826" y="422" fill="#9AA6AE" font-family="SF Mono, monospace" font-size="9" text-anchor="start">lpad(ldong_signgu_cd,3,'0')</text>
+
+        <!-- 하단 참조 -->
+        <text x="500" y="510" fill="var(--blueprint-text)" font-family="Pretendard, sans-serif" font-size="12" text-anchor="middle">시군구 코드표 (sigungu-codes.json) — 지역코드 ↔ 지역명 마스터, 252행</text>
+        <line x1="500" y1="474" x2="500" y2="498" stroke="var(--blueprint-line)" stroke-width="1" marker-end="url(#arrow)"/>
+
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="var(--blueprint-line)"/>
+          </marker>
+        </defs>
+      </svg>
+      <p class="blueprint-caption">실선 = 코드 직접 조인 · 갈색 점선 = 이름 매칭(불완전) · 회색 점선 = 코드 조합식 필요</p>
+    </div>
+
+    <div class="legend">
+      <span><i class="solid"></i> 코드 직접 조인 (신뢰도 높음)</span>
+      <span><i class="dashed"></i> 이름 텍스트 매칭 (불완전, fuzzy)</span>
+      <span><i class="formula"></i> 조합식 필요 (formula join)</span>
+    </div>
+  </section>
+
+  <!-- ════════ 03 키 호환성 매트릭스 ════════ -->
+  <section id="matrix">
+    <div class="section-head"><span class="num">03</span><h2>키 호환성 매트릭스</h2></div>
+    <p class="section-desc prose">각 소스가 어떤 키로 다른 소스와 이어지는지, 그리고 그 연결이 <em>정확한지 추정인지</em>를 한 표로 정리했습니다.</p>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>데이터 소스</th>
+            <th>해시코드<br/>(t_ats_cd류)</th>
+            <th>콘텐츠ID<br/>(content_id)</th>
+            <th>지역코드<br/>(법정동 5자리)</th>
+            <th>이름(텍스트)</th>
+            <th>시간</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>연관관광지</td>
+            <td><span class="tag exact">보유</span></td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">네이티브</span></td>
+            <td><span class="tag exact">보유</span></td>
+            <td class="mono">base_ym</td>
+          </tr>
+          <tr>
+            <td>기초지자체중심</td>
+            <td><span class="tag exact">보유 · tar_rlte와 74.5% 매칭</span></td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">네이티브</span></td>
+            <td><span class="tag exact">보유</span></td>
+            <td class="mono">base_ym</td>
+          </tr>
+          <tr>
+            <td>kor_poi</td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">보유(PK)</span></td>
+            <td><span class="tag formula">조합식 필요</span></td>
+            <td><span class="tag exact">보유(title)</span></td>
+            <td class="mono">created/modified</td>
+          </tr>
+          <tr>
+            <td>kor_detail / kor_with_detail</td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">보유(PK=FK)</span></td>
+            <td><span class="tag none">간접(kor_poi 경유)</span></td>
+            <td><span class="tag none">간접</span></td>
+            <td class="mono">-</td>
+          </tr>
+          <tr>
+            <td>혼잡도 예측</td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">네이티브</span></td>
+            <td><span class="tag fuzzy">이름만 존재</span></td>
+            <td class="mono">base_ymd (일별)</td>
+          </tr>
+          <tr>
+            <td>방문자수(datalab)</td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">네이티브</span></td>
+            <td><span class="tag none">지역명만</span></td>
+            <td class="mono">base_ymd (일별)</td>
+          </tr>
+          <tr>
+            <td>카카오 보완</td>
+            <td><span class="tag none">없음</span></td>
+            <td><span class="tag exact">보유(PK=FK)</span></td>
+            <td><span class="tag none">간접(kor_poi 경유)</span></td>
+            <td><span class="tag fuzzy">매칭 근거(fuzzy)</span></td>
+            <td class="mono">-</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ════════ 04 조인 예시 ════════ -->
+  <section id="joins">
+    <div class="section-head"><span class="num">04</span><h2>조인 전략 — 실제 쿼리 예시</h2></div>
+    <p class="section-desc prose">신뢰도가 <strong>높은 것부터</strong> 낮은 것 순서로 정리했습니다. 위쪽 두 개는 그대로 써도 되고, 아래쪽은 결과를 검증하며 쓰세요.</p>
+
+    <div class="snippet">
+      <div class="snippet-head"><h4>① 연관관광지 ↔ 기초지자체중심 (코드 직접 조인)</h4><span class="conf" style="color:var(--accent-deep)">신뢰도: 높음 · 74.5%</span></div>
+      <pre>select r.t_ats_nm, r.rlte_tats_nm, h.hub_rank
+from tar_rlte_records r
+join locgo_hub_records h
+  on h.hub_tats_cd in (r.t_ats_cd, r.rlte_tats_cd)
+ and h.base_ym = r.base_ym;</pre>
+      <p class="note">두 서비스가 같은 관광지 해시코드 마스터를 공유하는 것을 확인했습니다(전체 기준 74.5%). 이름이 아니라 코드로 묶이므로 동명이인/표기차 문제가 없습니다.</p>
+    </div>
+
+    <div class="snippet">
+      <div class="snippet-head"><h4>② kor_poi 지역코드 정규화 (법정동 5자리 만들기)</h4><span class="conf" style="color:var(--accent-deep)">신뢰도: 높음 · 검증됨</span></div>
+      <pre>select
+  content_id, title,
+  ldong_regn_cd || lpad(ldong_signgu_cd, 3, '0') as signgu_cd_5
+from kor_poi
+where ldong_signgu_cd <> '';</pre>
+      <p class="note">kor_poi는 시군구코드를 시도코드(2자리)와 뒤 3자리로 나눠 저장합니다. 단순히 <code>lpad(ldong_signgu_cd,5,'0')</code>로 5자리를 채우면 틀립니다 — 반드시 <code>ldong_regn_cd</code>를 앞에 붙여야 합니다.</p>
+    </div>
+
+    <div class="snippet">
+      <div class="snippet-head"><h4>③ 연관관광지 ↔ kor_poi 상세정보 (이름 매칭)</h4><span class="conf" style="color:var(--warn)">신뢰도: 중간 · 72~82%(표본)</span></div>
+      <pre>select r.t_ats_nm, r.rlte_tats_nm, p.addr1, p.mapx, p.mapy, d.overview
+from tar_rlte_records r
+join kor_poi p
+  on p.title = r.rlte_tats_nm
+ and p.service = 'kor'          -- kor/korwith 중복 방지 필수
+left join kor_detail d on d.content_id = p.content_id;</pre>
+      <p class="note">두 우주 사이엔 공유 코드가 없어 이름으로만 이어집니다. <code>p.service='kor'</code>를 빼먹으면 동일 content_id가 kor/korwith 양쪽에 있어 행이 중복됩니다. 동명 관광지가 여러 지역에 있을 수 있으니, 가능하면 지역코드도 함께 걸어 좁히세요.</p>
+    </div>
+
+    <div class="snippet">
+      <div class="snippet-head"><h4>④ 지역 단위 통합 (시군구 + 월 기준)</h4><span class="conf" style="color:var(--accent-deep)">신뢰도: 높음 · 지역코드 네이티브</span></div>
+      <pre>select
+  v.signgu_code, v.region_nm, v.base_ymd,
+  sum(v.tou_num) filter (where v.tou_div_cd='2') as 외지인,
+  (select count(*) from tar_rlte_records r
+     where r.signgu_cd = v.signgu_code and r.base_ym = left(v.base_ymd,6)) as 연관관광지_레코드수
+from datalab_visitor v
+where v.level = 'locgo'
+group by 1,2,3;</pre>
+      <p class="note">방문자수(일별 <code>base_ymd</code>)와 연관관광지(월별 <code>base_ym</code>)는 시간 단위가 달라 <code>left(base_ymd,6)</code>로 맞춰야 합니다. POI 코드가 없는 혼잡도·방문자수 데이터는 이렇게 <strong>지역+시간 단위</strong>로만 다른 데이터와 결합할 수 있습니다.</p>
+    </div>
+  </section>
+
+  <!-- ════════ 05 알려진 제약사항 ════════ -->
+  <section id="caveats">
+    <div class="section-head"><span class="num">05</span><h2>알려진 제약사항</h2></div>
+    <p class="section-desc prose">조인하기 전에 반드시 알아야 할 다섯 가지입니다. 위 쿼리 예시의 주석과 함께 보세요.</p>
+
+    <div class="caveats">
+      <div class="caveat">
+        <span class="mark">①</span>
+        <div><h4>이름 매칭은 완전하지 않습니다</h4>
+        <p>연관관광지↔kor_poi는 표본 기준 72~82%, 기초지자체중심↔kor_poi는 약 18%만 이름이 정확히 일치합니다. 표기 차이(약칭, 괄호 설명, 슬래시 병기)와 동명이인이 원인입니다. 매칭 실패분을 &ldquo;데이터 없음&rdquo;으로 처리하지 말고 별도 표시하세요.</p></div>
+      </div>
+      <div class="caveat">
+        <span class="mark">②</span>
+        <div><h4>content_id는 kor/korwith 서비스별로 중복됩니다</h4>
+        <p>무장애(korwith) 9,960건 전부가 일반(kor) 카탈로그에도 같은 content_id로 존재합니다. <code>service</code> 조건 없이 <code>kor_poi.content_id</code>로 조인하면 행이 2배로 뻥튀기됩니다.</p></div>
+      </div>
+      <div class="caveat">
+        <span class="mark">③</span>
+        <div><h4>kor_poi의 지역코드는 두 체계가 섞여 있습니다</h4>
+        <p><code>area_code</code>/<code>sigungu_code</code>는 TourAPI 자체의 구(舊) 코드(약 51%만 채워짐)이고, <code>ldong_regn_cd</code>+<code>ldong_signgu_cd</code>가 실제 법정동 코드(거의 100%)입니다. 지역 조인엔 반드시 후자를 쓰고, 조합식(위 ②번 쿼리)을 적용하세요.</p></div>
+      </div>
+      <div class="caveat">
+        <span class="mark">④</span>
+        <div><h4>혼잡도·방문자수는 POI 코드가 전혀 없습니다</h4>
+        <p>혼잡도(tats_cnctr)는 관광지 이름만, 방문자수(datalab_visitor)는 지역 단위 통계라 애초에 개별 장소를 가리키지 않습니다. 개별 관광지와 엮으려면 이름 매칭(혼잡도) 또는 지역코드 집계(방문자수)로만 가능합니다.</p></div>
+      </div>
+      <div class="caveat">
+        <span class="mark">⑤</span>
+        <div><h4>시간 단위가 테이블마다 다릅니다</h4>
+        <p>연관관광지·기초지자체중심은 <code>base_ym</code>(월별), 혼잡도·방문자수는 <code>base_ymd</code>(일별)입니다. 함께 쓰려면 <code>left(base_ymd, 6)</code>로 월 단위로 맞추세요. area_tar_div·kakao_place는 아직 0행이라 조인 대상에서 제외하세요.</p></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    moduwa-backend 데이터 파이프라인 · 이 문서는 실제 DB 쿼리로 검증된 수치 기준으로 작성되었습니다.
+    운영 상태(작업 큐 진행률)는 <code>npm run stats</code>, 무장애 속성 정의는
+    <code>docs/barrier-free-detail-fields.md</code>, API 카탈로그는 <code>docs/applied-apis.md</code>를 참고하세요.
+  </div>
+</footer>
+
+</body>
+</html>

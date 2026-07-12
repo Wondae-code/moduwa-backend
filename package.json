@@ -1,0 +1,42 @@
+{
+  "name": "moduwa-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "공공데이터포털 API 수집 → PostgreSQL 적재 파이프라인",
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f db",
+    "migrate": "tsx src/migrate.ts",
+    "seed": "tsx src/ingest.ts --seed-only",
+    "ingest": "tsx src/ingest.ts",
+    "ingest:locgo": "tsx src/ingest-locgo.ts",
+    "ingest:tats": "tsx src/ingest-tats.ts",
+    "ingest:datalab": "tsx src/ingest-datalab.ts",
+    "ingest:kor": "tsx src/ingest-kor.ts kor",
+    "ingest:korwith": "tsx src/ingest-kor.ts korwith",
+    "ingest:areadiv": "tsx src/ingest-areadiv.ts",
+    "ingest:withdetail": "tsx src/ingest-withdetail.ts",
+    "ingest:kordetail": "tsx src/ingest-kordetail.ts",
+    "ingest:kakao": "tsx src/ingest-kakao.ts",
+    "ingest:locgo-detail": "tsx src/ingest-locgo-detail.ts",
+    "ingest:pet": "tsx src/ingest-pet.ts",
+    "ingest:pet-detail": "tsx src/ingest-pet-detail.ts",
+    "stats": "tsx src/stats.ts",
+    "api": "tsx src/server/index.ts",
+    "start": "tsx src/server/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.8",
+    "dotenv": "^16.4.7",
+    "hono": "^4.12.29",
+    "pg": "^8.13.1",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2"
+  }
+}

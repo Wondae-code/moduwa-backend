@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>관광 데이터로 무엇을 만들 수 있나 — 기획 가이드</title>
+<style>
+  :root{
+    --ink:#20302C;
+    --ink-soft:#586460;
+    --ink-faint:#8A928D;
+    --paper:#F3F1EA;
+    --surface:#FFFFFF;
+    --surface-alt:#FBFAF5;
+    --teal:#2E6E62;
+    --teal-deep:#1F4D44;
+    --teal-tint:#E0EBE6;
+    --line:#DED8C9;
+    --line-soft:#EAE6DA;
+    /* 실현 가능성 (의미색 — 강조색과 별개) */
+    --go:#2F7A4E;      --go-bg:#E2F0E5;
+    --soon:#9A6B18;    --soon-bg:#F5EBD5;
+    --later:#8A8577;   --later-bg:#EDEAE0;
+    --font-display:"Nanum Myeongjo","AppleMyungjo","Apple SD Gothic Neo",serif;
+    --font-body:"Pretendard",-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto;}}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--font-body); font-size:16px; line-height:1.75;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--teal-tint); color:var(--teal-deep);}
+  a{color:var(--teal-deep); text-underline-offset:3px;}
+  a:focus-visible, summary:focus-visible{outline:2px solid var(--teal); outline-offset:3px;}
+  .wrap{max-width:1000px; margin:0 auto; padding:0 26px;}
+  .measure{max-width:660px;}
+
+  /* ── 히어로 ── */
+  .hero{padding:64px 0 40px;}
+  .kicker{
+    font-size:13px; letter-spacing:.06em; color:var(--teal-deep);
+    font-weight:600; margin:0 0 18px; display:flex; align-items:center; gap:9px;
+  }
+  .kicker .dot{width:7px; height:7px; border-radius:50%; background:var(--teal); display:inline-block;}
+  h1{
+    font-family:var(--font-display); font-weight:700;
+    font-size:clamp(30px,4.4vw,46px); line-height:1.24; letter-spacing:-.01em;
+    margin:0 0 20px; text-wrap:balance; color:var(--ink);
+  }
+  h1 em{font-style:normal; color:var(--teal-deep); }
+  .lede{font-size:18px; line-height:1.7; color:var(--ink-soft); max-width:620px; margin:0 0 34px;}
+  .figband{display:flex; flex-wrap:wrap; gap:34px; padding:22px 0 4px; border-top:1px solid var(--line);}
+  .fig .v{font-family:var(--font-display); font-size:30px; font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums; line-height:1;}
+  .fig .k{font-size:13.5px; color:var(--ink-soft); margin-top:6px;}
+
+  /* ── 내비 ── */
+  nav.toc{position:sticky; top:0; z-index:20; background:rgba(243,241,234,.9); backdrop-filter:blur(8px); border-top:1px solid var(--line); border-bottom:1px solid var(--line);}
+  nav.toc .wrap{display:flex; gap:6px; overflow-x:auto; padding:0 20px;}
+  nav.toc a{font-size:14px; white-space:nowrap; text-decoration:none; color:var(--ink-soft); padding:14px 12px; border-bottom:2px solid transparent;}
+  nav.toc a:hover{color:var(--teal-deep); border-color:var(--teal);}
+
+  section{padding:56px 0;}
+  section + section{border-top:1px solid var(--line-soft);}
+  .eyebrow{font-size:13px; font-weight:600; letter-spacing:.05em; color:var(--teal-deep); margin:0 0 8px;}
+  h2{font-family:var(--font-display); font-weight:700; font-size:clamp(24px,3vw,30px); margin:0 0 12px; letter-spacing:-.01em; text-wrap:balance;}
+  .sub{color:var(--ink-soft); margin:0 0 34px; max-width:640px; font-size:16.5px;}
+
+  /* ── 재료 카드 ── */
+  .ingredients{display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:16px;}
+  .ing{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:22px; display:flex; flex-direction:column; gap:12px;}
+  .ing-head{display:flex; align-items:center; gap:12px;}
+  .ico{width:40px; height:40px; border-radius:10px; background:var(--teal-tint); color:var(--teal-deep); display:grid; place-items:center; flex-shrink:0;}
+  .ico svg{width:22px; height:22px;}
+  .ing h3{font-family:var(--font-display); font-size:17.5px; font-weight:700; margin:0; line-height:1.35;}
+  .ing .scale{font-size:13px; color:var(--teal-deep); font-weight:600; font-variant-numeric:tabular-nums; margin-top:2px;}
+  .ing p{margin:0; font-size:14.5px; color:var(--ink-soft); line-height:1.65;}
+  .ing .use{margin-top:auto; padding-top:12px; border-top:1px dashed var(--line); font-size:13.5px;}
+  .ing .use b{color:var(--teal-deep); font-weight:600;}
+
+  /* 실현 가능성 배지 */
+  .pill{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; padding:4px 11px; border-radius:100px; white-space:nowrap;}
+  .pill.go{background:var(--go-bg); color:var(--go);}
+  .pill.soon{background:var(--soon-bg); color:var(--soon);}
+  .pill.later{background:var(--later-bg); color:var(--later);}
+  .pill .d{width:6px; height:6px; border-radius:50%; background:currentColor;}
+
+  /* ── 활용(조합→기능) ── */
+  .combos{display:flex; flex-direction:column; gap:18px;}
+  .combo{background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; display:grid; grid-template-columns:minmax(0,1fr) 300px;}
+  .combo-main{padding:24px 26px;}
+  .combo-main h3{font-family:var(--font-display); font-size:20px; font-weight:700; margin:0 0 8px;}
+  .combo-main p{margin:0 0 16px; color:var(--ink-soft); font-size:15px;}
+  .recipe{display:flex; align-items:center; flex-wrap:wrap; gap:9px; font-size:13.5px;}
+  .chip{background:var(--surface-alt); border:1px solid var(--line); border-radius:8px; padding:5px 11px; font-weight:500;}
+  .plus,.arrow{color:var(--ink-faint); font-weight:700;}
+  .result-chip{background:var(--teal-deep); color:#fff; border-radius:8px; padding:5px 12px; font-weight:600;}
+  .combo-side{background:var(--surface-alt); border-left:1px solid var(--line-soft); padding:24px; display:flex; flex-direction:column; gap:12px; justify-content:center;}
+  .combo-side .status-label{font-size:12px; color:var(--ink-faint); letter-spacing:.03em;}
+  .combo-side .link-note{font-size:13.5px; color:var(--ink-soft); line-height:1.6;}
+  .combo-side .link-note strong{color:var(--ink);}
+
+  /* 연결 신뢰도 범례 */
+  .legend{display:flex; flex-wrap:wrap; gap:14px; margin-bottom:30px;}
+  .legend .item{display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--ink-soft); background:var(--surface); border:1px solid var(--line-soft); border-radius:100px; padding:6px 14px;}
+  .legend .swatch{width:10px; height:10px; border-radius:50%;}
+
+  /* ── 한계 ── */
+  .limits{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px;}
+  .limit{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:20px 22px;}
+  .limit h3{font-family:var(--font-body); font-size:15.5px; font-weight:700; margin:0 0 7px; display:flex; gap:9px; align-items:baseline;}
+  .limit h3 .n{color:var(--soon); font-family:var(--font-display); font-size:15px;}
+  .limit p{margin:0; font-size:14px; color:var(--ink-soft); line-height:1.65;}
+
+  /* ── 로드맵 ── */
+  .steps{display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:14px; overflow:hidden;}
+  .step{background:var(--surface); padding:24px 22px;}
+  .step .phase{font-size:12.5px; font-weight:600; color:var(--teal-deep); letter-spacing:.04em;}
+  .step h3{font-family:var(--font-display); font-size:18px; margin:8px 0 8px;}
+  .step p{margin:0; font-size:14px; color:var(--ink-soft);}
+  .step.now{background:var(--teal-tint);}
+
+  .closing{margin-top:30px; padding:24px 26px; background:var(--teal-deep); color:#fff; border-radius:14px;}
+  .closing p{margin:0; font-size:17px; line-height:1.7;}
+  .closing strong{color:#F3F1EA;}
+
+  footer{padding:36px 0 64px; color:var(--ink-faint); font-size:13px;}
+
+  @media (max-width:720px){
+    .combo{grid-template-columns:1fr;}
+    .combo-side{border-left:none; border-top:1px solid var(--line-soft);}
+    .steps{grid-template-columns:1fr;}
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11Z"/><circle cx="12" cy="10" r="2.4"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="9" r="2.4"/><circle cx="9" cy="18" r="2.4"/><path d="M8 7.2 15.6 8.2M7.6 8 8.6 15.8"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 14.6 9l6 .8-4.4 4.2 1.1 6L12 17.2 6.7 20l1.1-6L3.4 9.8l6-.8Z"/></symbol>
+  <symbol id="i-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16a8 8 0 0 1 16 0"/><path d="m12 16 4-4"/><circle cx="12" cy="16" r="1"/></symbol>
+  <symbol id="i-access" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1.8"/><path d="M12 8v6h4l2 4M8.5 9.5 12 8M7 20a4 4 0 0 0 4-3"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.6V12l3 1.8"/></symbol>
+  <symbol id="i-trend" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18V6M4 18h16M8 15l3-4 3 2 4-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2"/><path d="M12 8v8M8 12h8"/></symbol>
+</defs></svg>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="kicker"><span class="dot"></span>모두와 · 관광 데이터 기획 가이드</p>
+    <h1>모아둔 관광 데이터로<br/><em>무엇을 만들 수 있는가</em></h1>
+    <p class="lede">전국 관광 정보 약 500만 건을 자동으로 모으고 있습니다. 이 문서는 그 데이터가 각각 무엇인지, 그리고 <strong>서로 합쳤을 때 어떤 서비스 기능이 되는지</strong>를 기획 관점에서 정리한 것입니다.</p>
+    <div class="figband">
+      <div class="fig"><div class="v">약 500만</div><div class="k">누적 데이터 건수</div></div>
+      <div class="fig"><div class="v">6만+</div><div class="k">전국 관광지·시설</div></div>
+      <div class="fig"><div class="v">25개월</div><div class="k">방문자 데이터 기간</div></div>
+      <div class="fig"><div class="v">0원</div><div class="k">데이터 구입 비용</div></div>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#materials">모은 재료</a>
+  <a href="#capabilities">합치면 되는 기능</a>
+  <a href="#limits">알아둘 한계</a>
+  <a href="#roadmap">다음 단계</a>
+</div></nav>
+
+<main class="wrap">
+
+  <!-- ══ 재료 ══ -->
+  <section id="materials">
+    <p class="eyebrow">우리가 모은 것</p>
+    <h2>일곱 가지 재료</h2>
+    <p class="sub">각 데이터가 &ldquo;무엇을 알려주는지&rdquo;로 정리했습니다. 이 재료들을 조합하면 다음 장의 기능이 됩니다.</p>
+
+    <div class="ingredients">
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-pin"/></svg></span>
+          <div><h3>전국 관광지 도감</h3><div class="scale">약 60,000곳 · 수집 완료</div></div>
+        </div>
+        <p>관광지·음식점·숙박·쇼핑 등 전국 시설의 이름, 위치, 사진, 분류. 모든 곳에 지도 좌표가 있어 바로 지도에 표시할 수 있습니다.</p>
+        <div class="use"><b>역할</b> — 모든 추천의 기본 후보 목록</div>
+      </div>
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-link"/></svg></span>
+          <div><h3>함께 가는 곳</h3><div class="scale">약 350만 쌍 · 수집 완료</div></div>
+        </div>
+        <p>&ldquo;경복궁에 간 사람은 어디를 또 갔나&rdquo; — 관광지마다 함께 방문하는 곳의 순위. 관광공사가 실제 이동 데이터로 계산한 자료입니다.</p>
+        <div class="use"><b>역할</b> — &ldquo;여기 좋았다면 여기도&rdquo; 추천 엔진</div>
+      </div>
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-star"/></svg></span>
+          <div><h3>지역 대표 관광지</h3><div class="scale">약 47만 건 · 수집 완료</div><div style="font-size:12px;color:var(--ink-faint);margin-top:3px;">원 자료 · 한국관광공사 기초지자체 중심 관광지 정보</div></div>
+        </div>
+        <p>시군구마다 그 달의 대표(중심) 관광지 순위. 지역 랜딩·&ldquo;○○ 가면 여기&rdquo; 큐레이션의 재료입니다.</p>
+        <div class="use"><b>역할</b> — 지역별 대표 명소 큐레이션</div>
+      </div>
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-gauge"/></svg></span>
+          <div><h3>혼잡도 예보</h3><div class="scale">약 8,500곳 · 매일 갱신</div></div>
+        </div>
+        <p>관광지가 앞으로 30일간 얼마나 붐빌지 예측. 일기예보처럼 매일 새로 계산됩니다. 포털 검색으로는 얻기 어려운 데이터입니다.</p>
+        <div class="use"><b>역할</b> — &ldquo;안 붐비는 곳&rdquo; 추천의 핵심</div>
+      </div>
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-access"/></svg></span>
+          <div><h3>무장애 여행 정보</h3><div class="scale">약 10,000곳 · 수집 중</div></div>
+        </div>
+        <p>장애인 화장실, 휠체어 대여, 점자블록 등 접근성 정보 28종. 이동 편의 정보는 잘 갖춰졌고, 시각·청각 정보는 상대적으로 적습니다.</p>
+        <div class="use"><b>역할</b> — 휠체어·유모차 맞춤 여행</div>
+      </div>
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-clock"/></svg></span>
+          <div><h3>관광지 소개·운영시간</h3><div class="scale">명소 위주 수집 중</div></div>
+        </div>
+        <p>관광지 소개글, 운영시간, 홈페이지. 지금은 &ldquo;가볼 곳&rdquo;(관광지·명소) 위주로 채우는 중이며, 채워진 곳은 소개글이 완전합니다.</p>
+        <div class="use"><b>역할</b> — 추천 이유와 방문 정보 제공</div>
+      </div>
+
+      <div class="ing">
+        <div class="ing-head">
+          <span class="ico"><svg><use href="#i-trend"/></svg></span>
+          <div><h3>방문자 트렌드</h3><div class="scale">약 64만 건 · 수집 완료</div></div>
+        </div>
+        <p>전국 지역별 하루 방문자 수를 현지인·외지인·외국인으로 나눠 2년치 집계. 성수기·주말 쏠림·지역 인기 흐름을 읽을 수 있습니다.</p>
+        <div class="use"><b>역할</b> — 시기·지역 트렌드 인사이트</div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ══ 조합 → 기능 ══ -->
+  <section id="capabilities">
+    <p class="eyebrow">재료를 합치면</p>
+    <h2>기능이 됩니다</h2>
+    <p class="sub">데이터 하나하나보다, <strong>어떤 재료를 합치는가</strong>가 서비스 기능을 결정합니다. 각 기능마다 필요한 재료와 &ldquo;지금 얼마나 확실히 되는지&rdquo;를 함께 표시했습니다.</p>
+
+    <div class="legend">
+      <span class="item"><span class="swatch" style="background:var(--go)"></span>바로 연결 — 같은 식별자로 정확히 이어짐</span>
+      <span class="item"><span class="swatch" style="background:var(--soon)"></span>이름으로 연결 — 약 4곳 중 3곳이 이어짐</span>
+      <span class="item"><span class="swatch" style="background:var(--later)"></span>지역 단위 — 개별 장소가 아닌 동네 기준</span>
+    </div>
+
+    <div class="combos">
+
+      <div class="combo">
+        <div class="combo-main">
+          <h3>&ldquo;여기 좋았다면, 여기도 어때요?&rdquo;</h3>
+          <p>사용자가 방문한(또는 관심 있는) 관광지를 기준으로, 실제 사람들이 함께 간 곳을 추천합니다. 예: 경복궁 → 북촌한옥마을 → 광장시장.</p>
+          <div class="recipe"><span class="chip">전국 관광지 도감</span><span class="plus"><svg width="16" height="16"><use href="#i-plus"/></svg></span><span class="chip">함께 가는 곳</span><span class="arrow">→</span><span class="result-chip">연관 추천</span></div>
+        </div>
+        <div class="combo-side">
+          <span class="pill go"><span class="d"></span>지금 가능</span>
+          <span class="link-note"><strong>바로 연결.</strong> 관광공사가 계산해 둔 실제 동선 데이터라, 사실상 완성된 추천 엔진입니다.</span>
+        </div>
+      </div>
+
+      <div class="combo">
+        <div class="combo-main">
+          <h3>&ldquo;이번 주말, 안 붐비는 곳&rdquo;</h3>
+          <p>혼잡도 예보를 얹어, 사람 많은 곳을 피하고 싶은 사용자에게 한산한 명소를 추천합니다. 경쟁 서비스가 갖기 어려운 차별점입니다.</p>
+          <div class="recipe"><span class="chip">전국 관광지 도감</span><span class="plus"><svg width="16" height="16"><use href="#i-plus"/></svg></span><span class="chip">혼잡도 예보</span><span class="arrow">→</span><span class="result-chip">한산한 곳 추천</span></div>
+        </div>
+        <div class="combo-side">
+          <span class="pill go"><span class="d"></span>지금 가능</span>
+          <span class="link-note"><strong>이름으로 연결.</strong> 혼잡도 데이터는 이름으로 이어져 약 4곳 중 3곳이 매칭됩니다. 안 붙는 곳은 &ldquo;정보 없음&rdquo;으로 처리하면 됩니다.</span>
+        </div>
+      </div>
+
+      <div class="combo">
+        <div class="combo-main">
+          <h3>휠체어로 갈 수 있는 여행</h3>
+          <p>접근성 정보를 붙여, 휠체어 이용자·유모차 동반 가족에게 &ldquo;실제로 갈 수 있는&rdquo; 코스를 추천합니다. 국내에 제대로 된 서비스가 드문 영역입니다.</p>
+          <div class="recipe"><span class="chip">전국 관광지 도감</span><span class="plus"><svg width="16" height="16"><use href="#i-plus"/></svg></span><span class="chip">무장애 여행 정보</span><span class="arrow">→</span><span class="result-chip">무장애 맞춤 여행</span></div>
+        </div>
+        <div class="combo-side">
+          <span class="pill soon"><span class="d"></span>수집 중 (약 절반)</span>
+          <span class="link-note"><strong>바로 연결.</strong> 같은 장소 식별자로 정확히 이어집니다. 데이터가 다 차면 즉시 활용 가능합니다.</span>
+        </div>
+      </div>
+
+      <div class="combo">
+        <div class="combo-main">
+          <h3>추천 이유와 방문 정보</h3>
+          <p>추천한 곳의 소개글·운영시간을 함께 보여줍니다. &ldquo;왜 추천하는지&rdquo;와 &ldquo;지금 문 열었는지&rdquo;를 답할 수 있게 됩니다.</p>
+          <div class="recipe"><span class="chip">전국 관광지 도감</span><span class="plus"><svg width="16" height="16"><use href="#i-plus"/></svg></span><span class="chip">소개·운영시간</span><span class="arrow">→</span><span class="result-chip">상세 정보</span></div>
+        </div>
+        <div class="combo-side">
+          <span class="pill soon"><span class="d"></span>수집 중 (명소 위주)</span>
+          <span class="link-note"><strong>바로 연결.</strong> 지금은 관광지·명소부터 채우는 중이라, 음식점·쇼핑 소개는 아직 얇습니다.</span>
+        </div>
+      </div>
+
+      <div class="combo">
+        <div class="combo-main">
+          <h3>지역 트렌드·성수기 인사이트</h3>
+          <p>지역별 방문자 흐름으로 성수기·비수기, 주말 쏠림, 뜨는 지역을 읽습니다. 마케팅·제휴·콘텐츠 발행 시점을 데이터로 정할 수 있습니다.</p>
+          <div class="recipe"><span class="chip">방문자 트렌드</span><span class="plus"><svg width="16" height="16"><use href="#i-plus"/></svg></span><span class="chip">지역 대표 관광지</span><span class="arrow">→</span><span class="result-chip">지역 인사이트</span></div>
+        </div>
+        <div class="combo-side">
+          <span class="pill go"><span class="d"></span>지금 가능</span>
+          <span class="link-note"><strong>지역 단위.</strong> 개별 가게가 아니라 동네(시군구) 기준 통계입니다. 지역 전략엔 딱 맞습니다.</span>
+        </div>
+      </div>
+
+      <div class="combo">
+        <div class="combo-main">
+          <h3>AI 여행 비서 <span style="font-size:13px; color:var(--ink-faint); font-weight:400;">— 위 모든 기능의 집대성</span></h3>
+          <p>&ldquo;다음 주에 부모님 모시고 갈, 안 붐비고 계단 없는 바닷가 추천해 줘&rdquo; — 위 재료를 AI가 조합해 근거 있는 답을 줍니다. 어려운 판단은 데이터가 이미 갖고 있어, 저렴한 AI로도 충분합니다.</p>
+          <div class="recipe"><span class="chip">모든 재료</span><span class="plus"><svg width="16" height="16"><use href="#i-plus"/></svg></span><span class="chip">AI</span><span class="arrow">→</span><span class="result-chip">자연어 추천 서비스</span></div>
+        </div>
+        <div class="combo-side">
+          <span class="pill soon"><span class="d"></span>시제품 단계 (다음)</span>
+          <span class="link-note">데이터 완성 후 첫 데모 예정. 광고 시청 후 이용 모델과 비용이 맞는 것을 확인했습니다.</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ══ 한계 ══ -->
+  <section id="limits">
+    <p class="eyebrow">솔직하게</p>
+    <h2>알아둘 한계</h2>
+    <p class="sub">기획 단계에서 미리 알아야 오해가 없습니다. 모두 &ldquo;치명적&rdquo;은 아니고, 기능 범위를 잡을 때 참고할 사항입니다.</p>
+    <div class="limits">
+      <div class="limit">
+        <h3><span class="n">01</span>상세 정보는 이름으로 이어져, 일부는 안 붙습니다</h3>
+        <p>혼잡도 같은 일부 데이터는 장소를 이름으로 연결합니다. 표기 차이(약칭·괄호·병기) 때문에 약 4곳 중 1곳은 매칭이 안 될 수 있어, &ldquo;정보 있는 곳만 추천&rdquo; 방식이 안전합니다.</p>
+      </div>
+      <div class="limit">
+        <h3><span class="n">02</span>혼잡도·방문자수는 &ldquo;장소&rdquo;가 아니라 &ldquo;지역/관광지&rdquo; 단위</h3>
+        <p>개별 카페 한 곳의 혼잡도는 없습니다. 방문자수는 동네(시군구) 통계, 혼잡도는 주요 관광지 단위입니다. 지역·명소 기준 기능엔 충분합니다.</p>
+      </div>
+      <div class="limit">
+        <h3><span class="n">03</span>소개·운영시간은 아직 명소 위주</h3>
+        <p>수집 속도 한계로 관광지·명소부터 채우고 있습니다. 음식점·쇼핑·숙박의 소개·영업시간은 추후 지도 API(카카오)로 보완할 계획입니다.</p>
+      </div>
+      <div class="limit">
+        <h3><span class="n">04</span>무장애 정보는 이동 편의에 치우쳐 있습니다</h3>
+        <p>화장실·주차·출입구 정보는 잘 갖춰졌지만, 시각장애(점자·음성)·청각장애 정보는 부족합니다. 휠체어·유모차 대상 기능이 우선 현실적입니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 로드맵 ══ -->
+  <section id="roadmap">
+    <p class="eyebrow">앞으로</p>
+    <h2>다음 단계</h2>
+    <p class="sub">지금은 재료를 모으는 1단계입니다. 핵심 데이터가 채워지면 그 위에 서비스를 올립니다.</p>
+    <div class="steps">
+      <div class="step now">
+        <div class="phase">1단계 · 진행 중</div>
+        <h3>데이터 자산 완성</h3>
+        <p>매일 자동 수집. 핵심 데이터는 이번 달 안에 대부분 완성됩니다.</p>
+      </div>
+      <div class="step">
+        <div class="phase">2단계</div>
+        <h3>추천 시제품</h3>
+        <p>&ldquo;질문 → 추천&rdquo; 데모를 만들고, AI 품질·비용을 실측해 검증합니다.</p>
+      </div>
+      <div class="step">
+        <div class="phase">3단계</div>
+        <h3>앱 연동·수익화</h3>
+        <p>광고 연동과 24시간 운영 체계로 실서비스에 올립니다.</p>
+      </div>
+    </div>
+    <div class="closing">
+      <p>정리하면 — <strong>데이터 구입비 0원</strong>으로 추천·혼잡도·접근성까지 갖춘 전국 관광 데이터가 자동으로 쌓이고 있고, 이번 달 핵심 데이터가 완성되면 그 위에 <strong>AI 여행 추천 시제품</strong>을 올릴 준비가 됩니다.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer><div class="wrap">모두와 · 관광 데이터 기획 가이드 · 수치는 실제 수집 데이터 기준 (2026년 7월, 수집 진행에 따라 증가)</div></footer>
+
+</body>
+</html>
