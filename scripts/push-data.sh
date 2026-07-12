@@ -10,7 +10,8 @@ set -euo pipefail
 : "${TARGET_DATABASE_URL:?TARGET_DATABASE_URL 환경변수를 설정하세요 (관리형 DB 공개 접속 URL)}"
 
 # API가 실제로 참조하는 것만 (뷰 + 의존 테이블)
-TABLES="-t pet_tour_poi -t pet_tour_detail -t kor_with_detail -t kor_detail -t locgo_hub_detail -t pet_friendly_view"
+#  ⚠️ reviews 는 현재 시드 전용이라 포함. 쓰기(POST) 도입 시 관리형이 소스가 되므로 이 목록에서 제외할 것.
+TABLES="-t pet_tour_poi -t pet_tour_detail -t kor_with_detail -t kor_detail -t locgo_hub_detail -t pet_friendly_view -t barrier_free -t reviews"
 DUMP="/tmp/moduwa-slim-$(date +%Y%m%d%H%M%S).sql"
 
 echo "① 슬림 덤프 (API 대상 테이블만, --clean 포함)"
@@ -28,7 +29,9 @@ docker exec moduwa-postgres psql "$TARGET_DATABASE_URL" -c "
   union all select 'kor_with_detail', count(*) from kor_with_detail
   union all select 'kor_detail', count(*) from kor_detail
   union all select 'locgo_hub_detail', count(*) from locgo_hub_detail
-  union all select 'pet_friendly_view', count(*) from pet_friendly_view;"
+  union all select 'pet_friendly_view', count(*) from pet_friendly_view
+  union all select 'barrier_free', count(*) from barrier_free
+  union all select 'reviews', count(*) from reviews;"
 
 rm -f "$DUMP"
 echo "✅ 동기화 완료 (임시 덤프 삭제됨)"

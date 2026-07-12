@@ -34,7 +34,7 @@ LOG="$PROJECT/logs/daily-ingest-$(date +%Y%m%d).log"
 
   # 4) 수집 — 각 서비스는 독립 일일쿼터라 순차 실행해도 서로 경쟁하지 않음.
   #    queue형(연관관광지·기초지자체중심)은 남은 작업만 이어서, 단발형은 최신 갱신.
-  for cmd in ingest ingest:locgo ingest:tats ingest:datalab ingest:kor ingest:korwith ingest:areadiv ingest:withdetail ingest:kordetail ingest:kakao ingest:locgo-detail ingest:pet ingest:pet-detail; do
+  for cmd in ingest ingest:locgo ingest:tats ingest:datalab ingest:kor ingest:korwith ingest:areadiv ingest:withdetail ingest:kordetail ingest:kakao ingest:locgo-detail ingest:pet ingest:pet-detail ingest:barrier-free; do
     echo "──── npm run $cmd ($(date '+%H:%M:%S')) ────"
     npm run "$cmd" || echo "[wrap] $cmd 실패 — 계속 진행"
   done

@@ -23,6 +23,7 @@
     "ingest:locgo-detail": "tsx src/ingest-locgo-detail.ts",
     "ingest:pet": "tsx src/ingest-pet.ts",
     "ingest:pet-detail": "tsx src/ingest-pet-detail.ts",
+    "ingest:barrier-free": "tsx src/ingest-barrier-free.ts",
     "stats": "tsx src/stats.ts",
     "api": "tsx src/server/index.ts",
     "start": "tsx src/server/index.ts"

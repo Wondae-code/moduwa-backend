@@ -33,6 +33,9 @@ export function buildApp(): Hono {
       'GET /v1/pet-friendly/:contentId',
       'GET /v1/attractions?sigungu=&source=&q=&limit=&offset=',
       'GET /v1/attractions/:hubTatsCd',
+      'GET /v1/barrier-free?type=&region=&sigungu=&q=&hasImage=&hasAccess=&limit=&offset=',
+      'GET /v1/barrier-free/:contentId',
+      'GET /v1/reviews?sort=recommended|latest&contentId=&limit=&offset=',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
   }));
@@ -112,6 +115,67 @@ export function buildApp(): Hono {
     const rows = (await query(`select ${ATTR_COLS} from locgo_hub_detail where hub_tats_cd = $1`, [id])).rows;
     if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
     return c.json(rows[0]);
+  });
+
+  // 무장애(접근성) 장소 — 28속성 전부 노출
+  const BF_COLS = `contentid, title, contenttypeid, addr1, addr2, mapx, mapy, firstimage, firstimage2,
+    ldong_regn_cd, ldong_signgu_cd,
+    parking, route, publictransport, ticketoffice, promotion, wheelchair, exit, elevator, restroom,
+    auditorium, room, handicapetc,
+    braileblock, helpdog, guidehuman, audioguide, bigprint, brailepromotion, guidesystem, blindhandicapetc,
+    signguide, videoguide, hearingroom, hearinghandicapetc,
+    stroller, lactationroom, babysparechair, infantsfamilyetc,
+    has_image, has_access`;
+
+  v1.get('/barrier-free', async (c) => {
+    const { limit, offset } = paging(c);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const add = (cond: string, val: unknown) => { params.push(val); where.push(cond.replace('?', `$${params.length}`)); };
+
+    const type = c.req.query('type');        if (type) add('contenttypeid = ?', type);
+    const region = c.req.query('region');    if (region) add('ldong_regn_cd = ?', region);
+    const sigungu = c.req.query('sigungu');  if (sigungu) add('ldong_signgu_cd = ?', sigungu);
+    const q = c.req.query('q');              if (q) add('title ilike ?', `%${q}%`);
+    if (c.req.query('hasImage') === 'true') where.push('has_image');
+    if (c.req.query('hasAccess') === 'true') where.push('has_access');
+
+    const wsql = where.length ? `where ${where.join(' and ')}` : '';
+    const total = (await query<{ n: number }>(`select count(*)::int n from barrier_free ${wsql}`, params)).rows[0]!.n;
+    const rows = (await query(
+      `select ${BF_COLS} from barrier_free ${wsql} order by has_image desc, has_access desc, contentid limit ${limit} offset ${offset}`, params,
+    )).rows;
+    return c.json({ total, limit, offset, count: rows.length, items: rows });
+  });
+
+  v1.get('/barrier-free/:contentId', async (c) => {
+    const id = c.req.param('contentId');
+    const rows = (await query(`select ${BF_COLS} from barrier_free where contentid = $1`, [id])).rows;
+    if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
+    return c.json(rows[0]);
+  });
+
+  // 여행자 리뷰 — iOS TravelReview 필드명으로 매핑
+  v1.get('/reviews', async (c) => {
+    const { limit, offset } = paging(c);
+    const order = c.req.query('sort') === 'latest'
+      ? 'created_at desc'
+      : '(like_count + comment_count) desc, created_at desc'; // recommended(기본)
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const contentId = c.req.query('contentId');
+    if (contentId) { params.push(contentId); where.push(`content_id = $${params.length}`); }
+    const wsql = where.length ? `where ${where.join(' and ')}` : '';
+
+    const total = (await query<{ n: number }>(`select count(*)::int n from reviews ${wsql}`, params)).rows[0]!.n;
+    const rows = (await query(
+      `select id, content_id as "contentId", location_nm as location, author_nm as author, body,
+              like_count as "likeCount", comment_count as "commentCount",
+              is_accessibility_verified as "isAccessibilityVerified",
+              to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt"
+         from reviews ${wsql} order by ${order} limit ${limit} offset ${offset}`, params,
+    )).rows;
+    return c.json({ total, limit, offset, count: rows.length, items: rows });
   });
 
   app.route('/v1', v1);
