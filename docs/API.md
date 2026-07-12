@@ -10,7 +10,7 @@ x-api-key: <API_KEY>
 ```
 키가 없거나 틀리면 **401**. 분당 요청 한도 초과 시 **429**(`Retry-After` 헤더 참고).
 
-베이스 URL: `https://<배포도메인>`
+베이스 URL: `https://moduwa-backend-production.up.railway.app`
 
 ## 공개 엔드포인트 (인증 불필요)
 | 메서드 | 경로 | 설명 |
@@ -73,7 +73,7 @@ GET /v1/pet-friendly/1019041
 ## 예제
 ```bash
 KEY=mdw_xxx
-BASE=https://xxx.up.railway.app
+BASE=https://moduwa-backend-production.up.railway.app
 
 # 서울에서 전구역 반려동물 동반 가능한 곳
 curl -H "Authorization: Bearer $KEY" \

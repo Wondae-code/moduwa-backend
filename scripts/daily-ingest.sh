@@ -39,5 +39,15 @@ LOG="$PROJECT/logs/daily-ingest-$(date +%Y%m%d).log"
     npm run "$cmd" || echo "[wrap] $cmd 실패 — 계속 진행"
   done
 
+  # 5) 관리형 DB 동기화 — API용 슬림 테이블만 push (무거운 원본은 로컬에만 유지).
+  #    .env 에 MANAGED_DATABASE_URL 이 설정돼 있으면 실행. 없으면 조용히 건너뜀.
+  MANAGED_URL="$(grep -E '^MANAGED_DATABASE_URL=' "$PROJECT/.env" 2>/dev/null | cut -d= -f2-)"
+  if [ -n "${MANAGED_URL:-}" ]; then
+    echo "──── 관리형 DB 슬림 동기화 ($(date '+%H:%M:%S')) ────"
+    TARGET_DATABASE_URL="$MANAGED_URL" bash "$PROJECT/scripts/push-data.sh" || echo "[wrap] 동기화 실패 — 다음 실행에서 재시도"
+  else
+    echo "[wrap] MANAGED_DATABASE_URL 미설정 — 관리형 동기화 생략"
+  fi
+
   echo "════════ $(date '+%Y-%m-%d %H:%M:%S') 완료 ════════"
 } >> "$LOG" 2>&1
