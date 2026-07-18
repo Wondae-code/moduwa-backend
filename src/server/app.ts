@@ -172,6 +172,7 @@ export function buildApp(): Hono {
       `select id, content_id as "contentId", location_nm as location, author_nm as author, body,
               like_count as "likeCount", comment_count as "commentCount",
               is_accessibility_verified as "isAccessibilityVerified",
+              image_urls as "imageURLs",
               to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt"
          from reviews ${wsql} order by ${order} limit ${limit} offset ${offset}`, params,
     )).rows;
