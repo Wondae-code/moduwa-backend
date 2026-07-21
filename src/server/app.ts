@@ -148,11 +148,68 @@ export function buildApp(): Hono {
     return c.json({ total, limit, offset, count: rows.length, items: rows });
   });
 
+  // TourAPI 텍스트 정리: <br> → ' / ', 태그 제거, 엔티티·공백 정리
+  const cleanIntroText = (v: string | null | undefined): string | null => {
+    if (!v) return null;
+    const t = v
+      .replace(/<br\s*\/?>/gi, ' / ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return t.length ? t : null;
+  };
+
+  // homepage 원문('<a href="...">...</a>')에서 URL만 추출
+  const extractUrl = (v: string | null | undefined): string | null => {
+    if (!v) return null;
+    const url = (v.match(/href="([^"]+)"/i)?.[1] ?? v).trim();
+    return /^https?:\/\//i.test(url) ? url : null;
+  };
+
+  // detailIntro2 원본(타입별 필드 상이) → 기본정보 공통 스키마
+  const basicInfoFrom = (intro: Record<string, string> | null | undefined, contentTypeId: string | null) => {
+    const g = (k: string) => cleanIntroText(intro?.[k]);
+    switch (contentTypeId) {
+      case '12': // 관광지
+        return { usetime: g('usetime'), restdate: g('restdate'), parking: g('parking'), fee: null, infocenter: g('infocenter') };
+      case '32': { // 숙박: 입실/퇴실을 운영시간 형태로
+        const checkin = g('checkintime');
+        const checkout = g('checkouttime');
+        const inout = [checkin && `입실 ${checkin}`, checkout && `퇴실 ${checkout}`].filter(Boolean).join(' / ');
+        return { usetime: inout || null, restdate: null, parking: g('parkinglodging'), fee: null, infocenter: g('infocenterlodging') };
+      }
+      case '39': // 음식점
+        return { usetime: g('opentimefood'), restdate: g('restdatefood'), parking: g('parkingfood'), fee: null, infocenter: g('infocenterfood') };
+      case '15': { // 축제·공연: 공연시간 없으면 행사기간으로 대체
+        const period = [g('eventstartdate'), g('eventenddate')].filter(Boolean).join(' ~ ');
+        return { usetime: g('playtime') ?? (period || null), restdate: null, parking: null, fee: g('usetimefestival'), infocenter: g('sponsor1tel') };
+      }
+      default:
+        return { usetime: null, restdate: null, parking: null, fee: null, infocenter: null };
+    }
+  };
+
+  // 장소 상세 — 무장애 28속성 + kor_detail(개요·홈페이지·전화·기본정보) enrich
   v1.get('/barrier-free/:contentId', async (c) => {
     const id = c.req.param('contentId');
     const rows = (await query(`select ${BF_COLS} from barrier_free where contentid = $1`, [id])).rows;
     if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
-    return c.json(rows[0]);
+    const base = rows[0]! as Record<string, unknown>;
+
+    const detail = (await query<{
+      overview: string | null; homepage: string | null; tel: string | null;
+      intro_raw: Record<string, string> | null;
+    }>('select overview, homepage, tel, intro_raw from kor_detail where content_id = $1', [id])).rows[0];
+
+    const info = basicInfoFrom(detail?.intro_raw, base.contenttypeid as string | null);
+    return c.json({
+      ...base,
+      overview: detail?.overview?.trim() || null,
+      homepage: extractUrl(detail?.homepage),
+      tel: cleanIntroText(detail?.tel) ?? info.infocenter,
+      basicInfo: { usetime: info.usetime, restdate: info.restdate, parking: info.parking, fee: info.fee },
+    });
   });
 
   // 여행자 리뷰 — iOS TravelReview 필드명으로 매핑
