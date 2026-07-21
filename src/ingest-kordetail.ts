@@ -37,12 +37,16 @@ async function main() {
   console.log(`[kordetail] 대상유형 [${types.join(',')}] · 전체 ${total} · 완료 ${done} · 남음 ${total - done}`);
 
   const cap = config.dailyRequestCap > 0 ? config.dailyRequestCap : total;
+  // 무장애(korwith) 대상 콘텐츠 우선 — 앱 장소 상세에서 바로 쓰이는 것부터 채운다.
+  // 그 안에서는 숙박·음식점(아직 미수집) → 가볼 곳 순.
   const pend = await query<Pend>(
     `select k.content_id, k.content_type_id from kor_poi k
       where k.service='kor' and k.content_id is not null and k.content_type_id = any($1::text[])
         and not exists (select 1 from kor_detail d where d.content_id = k.content_id)
-      order by (case k.content_type_id when '12' then 0 when '14' then 1 when '28' then 2 when '15' then 3
-                  when '25' then 4 else 9 end), k.content_id
+      order by (case when exists (select 1 from kor_poi w where w.service='korwith' and w.content_id = k.content_id)
+                  then 0 else 1 end),
+               (case k.content_type_id when '32' then 0 when '39' then 1 when '12' then 2 when '14' then 3
+                  when '28' then 4 when '15' then 5 when '25' then 6 else 9 end), k.content_id
       limit ${cap}`,
     [types],
   );

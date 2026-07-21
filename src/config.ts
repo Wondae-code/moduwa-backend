@@ -39,10 +39,10 @@ export const config = {
   // 0 = 무제한(API의 한도초과 에러에 의존).
   dailyRequestCap: num('INGEST_DAILY_REQUEST_CAP', 900),
 
-  // KorService2 상세 enrich 대상 콘텐츠 유형. 기본은 개요·운영시간 가치 높은 '가볼 곳'만
-  // (12관광지·14문화시설·28레포츠·15축제공연·25여행코스). 상업유형(음식점39·쇼핑38·숙박32) 제외.
+  // KorService2 상세 enrich 대상 콘텐츠 유형.
+  // 숙박(32)·음식점(39)은 모두와 앱의 장소 상세(설명·운영시간·기본정보)에 필요해 포함. 쇼핑(38)만 제외.
   // 전체를 원하면 8종 모두 나열: 12,14,28,15,25,32,38,39
-  kordetailTypes: (process.env.KORDETAIL_CONTENT_TYPES?.trim() || '12,14,28,15,25')
+  kordetailTypes: (process.env.KORDETAIL_CONTENT_TYPES?.trim() || '12,14,28,15,25,32,39')
     .split(',').map((s) => s.trim()).filter(Boolean),
 
   // 카카오 로컬 API (전화·카테고리·지도링크 보완). 발급: developers.kakao.com
