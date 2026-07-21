@@ -23,8 +23,10 @@ trap 'rm -f "$DUMP"' EXIT
 
 psql_target() { docker exec -i moduwa-postgres psql "$TARGET_DATABASE_URL" -v ON_ERROR_STOP=1 "$@"; }
 
-echo "① 의존 뷰 드롭 (테이블 교체를 막지 않도록)"
+echo "① 의존 뷰 드롭 (테이블 교체를 막지 않도록) + 확장 준비"
 psql_target -c "drop view if exists pet_friendly_view;"
+# barrier_free 의 trgm 인덱스(015)가 덤프에 포함되므로 대상에도 확장 필요
+psql_target -c "create extension if not exists pg_trgm;"
 
 echo "② 테이블별 순차 교체 (각각 단일 트랜잭션)"
 for t in $TABLES; do

@@ -35,6 +35,7 @@ export function buildApp(): Hono {
       'GET /v1/attractions/:hubTatsCd',
       'GET /v1/barrier-free?type=&region=&sigungu=&q=&hasImage=&hasAccess=&limit=&offset=',
       'GET /v1/barrier-free/:contentId',
+      'GET /v1/search?q=&limit=&offset=',
       'GET /v1/reviews?sort=recommended|latest&contentId=&limit=&offset=',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
@@ -210,6 +211,77 @@ export function buildApp(): Hono {
       tel: cleanIntroText(detail?.tel) ?? info.infocenter,
       basicInfo: { usetime: info.usetime, restdate: info.restdate, parking: info.parking, fee: info.fee },
     });
+  });
+
+  // ILIKE 패턴 메타문자 이스케이프 (사용자 입력 검색어용)
+  const escapeLike = (s: string) => s.replace(/[\\%_]/g, '\\$&');
+
+  // contenttypeid → 카테고리 라벨 (TourAPI 관광타입)
+  const CATEGORY_LABELS: Record<string, string> = {
+    '12': '관광지', '14': '문화시설', '15': '축제공연행사', '25': '여행코스',
+    '28': '레포츠', '32': '숙박', '38': '쇼핑', '39': '음식점',
+  };
+
+  // 시도명 축약 — addr1 첫 토큰용
+  const SIDO_SHORT: Record<string, string> = {
+    '서울특별시': '서울', '부산광역시': '부산', '대구광역시': '대구', '인천광역시': '인천',
+    '광주광역시': '광주', '대전광역시': '대전', '울산광역시': '울산', '세종특별자치시': '세종',
+    '경기도': '경기', '강원특별자치도': '강원', '강원도': '강원',
+    '충청북도': '충북', '충청남도': '충남',
+    '전북특별자치도': '전북', '전라북도': '전북', '전라남도': '전남',
+    '경상북도': '경북', '경상남도': '경남', '제주특별자치도': '제주', '제주도': '제주',
+  };
+
+  // addr1("서울특별시 종로구 사직로 161") → 축약 지역("서울 종로구")
+  const shortRegion = (addr1: string | null): string | null => {
+    if (!addr1) return null;
+    const [sido, sigungu] = addr1.trim().split(/\s+/);
+    if (!sido) return null;
+    return [SIDO_SHORT[sido] ?? sido, sigungu].filter(Boolean).join(' ');
+  };
+
+  // 통합 검색 — 검색 페이지(iOS)용 (#3). barrier_free 대상, title·addr1 매칭 + 관련성 정렬
+  v1.get('/search', async (c) => {
+    const q = c.req.query('q')?.trim() ?? '';
+    if (!q) return c.json({ error: 'missing_q' }, 400);
+    if (q.length > 100) return c.json({ error: 'q_too_long' }, 400);
+    const { limit, offset } = paging(c);
+    const pattern = escapeLike(q); // $1 — ILIKE용, $2 는 정확 일치용 원문
+
+    const wsql = `where title ilike '%' || $1 || '%' or addr1 ilike '%' || $1 || '%'`;
+    const total = (await query<{ n: number }>(
+      `select count(*)::int n from barrier_free ${wsql}`, [pattern],
+    )).rows[0]!.n;
+    const rows = (await query<{
+      contentid: string; title: string | null; contenttypeid: string | null;
+      addr1: string | null; firstimage: string | null;
+      access_wheelchair: boolean; access_visual: boolean; access_hearing: boolean; access_infant: boolean;
+    }>(
+      `select contentid, title, contenttypeid, addr1, firstimage,
+              access_wheelchair, access_visual, access_hearing, access_infant
+         from barrier_free ${wsql}
+        order by case
+            when lower(title) = lower($2)     then 0
+            when title ilike $1 || '%'        then 1
+            when title ilike '%' || $1 || '%' then 2
+            else 3
+          end, has_image desc, has_access desc, char_length(title), title, contentid
+        limit ${limit} offset ${offset}`, [pattern, q],
+    )).rows;
+
+    const items = rows.map((r) => ({
+      contentid: r.contentid,
+      title: r.title,
+      contenttypeid: r.contenttypeid,
+      category: (r.contenttypeid && CATEGORY_LABELS[r.contenttypeid]) || null,
+      region: shortRegion(r.addr1),
+      firstimage: r.firstimage || null,
+      access: {
+        wheelchair: r.access_wheelchair, visual: r.access_visual,
+        hearing: r.access_hearing, infant: r.access_infant,
+      },
+    }));
+    return c.json({ total, limit, offset, count: items.length, items });
   });
 
   // 여행자 리뷰 — iOS TravelReview 필드명으로 매핑
