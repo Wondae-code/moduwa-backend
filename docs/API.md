@@ -70,6 +70,31 @@ GET /v1/pet-friendly/1019041
 
 ### GET /v1/attractions/:hubTatsCd — 단건
 
+### GET /v1/search — 통합 검색 (검색 페이지용)
+무장애 장소(barrier_free) 대상. 이름 부분 일치 + 지역명(주소) 매칭, 관련성 정렬(정확 > 접두 > 부분 > 지역, 동순위는 사진·접근성 정보 보유 우선).
+
+| 파라미터 | 예시 | 설명 |
+|---|---|---|
+| `q` | `경복궁` | **필수.** 검색어(최대 100자). 없으면 `400 {"error":"missing_q"}` |
+| `limit`/`offset` | | 페이지네이션 |
+
+응답:
+```json
+{
+  "total": 2, "limit": 20, "offset": 0, "count": 2,
+  "items": [{
+    "contentid": "126508", "title": "경복궁",
+    "contenttypeid": "12", "category": "관광지",
+    "region": "서울 종로구",
+    "firstimage": "https://tong.visitkorea.or.kr/...jpg",
+    "access": { "wheelchair": true, "visual": true, "hearing": false, "infant": true }
+  }]
+}
+```
+- `category`: 콘텐츠유형 라벨(12관광지·14문화시설·15축제공연행사·25여행코스·28레포츠·32숙박·38쇼핑·39음식점)
+- `region`: 주소 축약("서울특별시 종로구 …" → "서울 종로구")
+- `access`: 접근성 배지 — 이동(wheelchair)·시각(visual)·청각(hearing)·영유아(infant) 정보 보유 여부
+
 ## 예제
 ```bash
 KEY=mdw_xxx
