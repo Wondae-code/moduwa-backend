@@ -1,6 +1,6 @@
 # moduwa 관광 데이터 API
 
-한국관광공사 TourAPI 기반 관광 데이터 조회 API (읽기 전용).
+한국관광공사 TourAPI 기반 관광 데이터 조회 API. 관광 데이터는 읽기 전용이고, **리뷰만 쓰기(POST)가 가능**하다.
 
 ## 인증
 모든 `/v1/*` 요청에 발급받은 API 키가 필요합니다. 둘 중 하나:
@@ -95,6 +95,102 @@ GET /v1/pet-friendly/1019041
 - `region`: 주소 축약("서울특별시 종로구 …" → "서울 종로구")
 - `access`: 접근성 배지 — 이동(wheelchair)·시각(visual)·청각(hearing)·영유아(infant) 정보 보유 여부
 
+## 리뷰 (여행자 후기)
+
+TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장소 상세 '리뷰' 섹션에서 쓴다.
+
+### GET /v1/reviews — 리뷰 목록
+| 파라미터 | 예시 | 설명 |
+|---|---|---|
+| `sort` | `latest` | `recommended`(기본, 좋아요+댓글 순) / `latest`(최신순) |
+| `contentId` | `2465063` | 특정 장소의 리뷰만. 없으면 전역 목록 |
+| `limit`/`offset` | | 페이지네이션 |
+
+응답:
+```json
+{
+  "total": 2, "limit": 20, "offset": 0, "count": 2,
+  "items": [{
+    "id": 2,
+    "contentId": "2465063",
+    "location": "강릉 녹색도시체험센터",
+    "author": "도현",
+    "body": "실내 전시라 휠체어로 전 구역 이동이 편했고 …",
+    "rating": 5,
+    "likeCount": 88, "commentCount": 15,
+    "isAccessibilityVerified": true,
+    "imageURLs": ["https://tong.visitkorea.or.kr/...jpg"],
+    "createdAt": "2026-07-11T11:13:12Z",
+    "authorInfo": { "nickname": "도현", "reviewCount": 1, "level": 2 }
+  }]
+}
+```
+- `rating`: 별점 1~5. **`null` 가능** — 별점 이전에 작성된 리뷰(텍스트 전용)
+- `author`: 레거시 표시용 닉네임 문자열. iOS가 라이브로 쓰고 있어 유지된다
+- `authorInfo`: 작성자 프로필 — `nickname`, `reviewCount`(해당 작성자의 총 리뷰 수)
+  - `level`: **저장하지 않고 `reviewCount`에서 파생.** 임계값 1·3·6·10·20·50·100 (0건=1, 1\~2건=2, 3\~5건=3, 6\~9건=4, 10\~19건=5, 20\~49건=6, 50\~99건=7, 100건+=8)
+- `contentId`: 연결된 장소. 자유 방문지면 `null`
+- `isAccessibilityVerified`: ♿ 검증 뱃지. 현재 쓰기 API로는 설정되지 않고 항상 `false`
+
+### GET /v1/reviews/summary — 장소 단위 전체 평점
+장소 상세 헤더의 "★ 4.3 · 후기 235"용.
+
+| 파라미터 | 예시 | 설명 |
+|---|---|---|
+| `contentId` | `2465063` | **필수.** 없으면 `400 {"error":"missing_contentId"}` |
+
+```json
+{ "contentId": "2465063", "avgRating": 4.5, "reviewCount": 2, "ratedCount": 2 }
+```
+- `avgRating`: 평균 별점(소수 1자리). **`rating`이 `null`인 리뷰는 평균에서 제외된다.** 별점이 하나도 없으면 `null`
+- `reviewCount`: 전체 후기 수(별점 없는 것 포함) — 화면의 "후기 N"에 쓴다
+- `ratedCount`: 그중 별점이 있는 수 = `avgRating`의 모집단. `reviewCount`와 다를 수 있다
+
+### POST /v1/reviews — 리뷰 작성
+`Content-Type: application/json`. 인증은 다른 `/v1/*`와 동일(Bearer API 키).
+
+로그인 체계가 없으므로 작성자는 **기기 UUID(`deviceId`) + 닉네임**으로 식별한다. 같은 `deviceId`로 여러 번 쓰면 작성자(`authors`) 행은 하나만 생기고 재사용된다.
+
+| 필드 | 필수 | 설명 |
+|---|---|---|
+| `deviceId` | ✅ | 기기 UUID(≤128자). **응답에는 절대 포함되지 않는다** — 사실상 신원 토큰 |
+| `locationNm` | ✅ | 표시용 장소명(≤200자) |
+| `rating` | ✅ | 1~5 **정수**(숫자 타입). 소수·문자열은 400 |
+| `body` | ✅ | 본문(공백만이면 400, ≤2000자) |
+| `authorNm` | 조건부 | 닉네임(≤40자). 처음 쓰는 기기면 필수, 이미 아는 기기면 생략 시 기존 닉네임 재사용(보내면 갱신) |
+| `contentId` | | 연결할 장소(≤64자). 생략하면 자유 방문지 |
+| `imageURLs` | | 사진 URL 문자열 배열. 최대 5장, `http(s)`만. 업로드 자체는 이 API 범위 밖 |
+
+```bash
+curl -X POST "$BASE/v1/reviews" \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "contentId": "2465063",
+    "locationNm": "강릉 녹색도시체험센터",
+    "rating": 4,
+    "body": "엘리베이터가 넓어 휠체어로 층 이동이 편했습니다.",
+    "authorNm": "바다",
+    "deviceId": "A1B2C3D4-E5F6-4711-8899-AABBCCDDEEFF",
+    "imageURLs": ["https://example.com/photo1.jpg"]
+  }'
+```
+**201** + 생성된 리뷰 1건(GET 목록 item과 같은 형태, `authorInfo` 포함):
+```json
+{
+  "id": 15, "contentId": "2465063", "location": "강릉 녹색도시체험센터",
+  "author": "바다", "body": "엘리베이터가 넓어 …", "rating": 4,
+  "likeCount": 0, "commentCount": 0, "isAccessibilityVerified": false,
+  "imageURLs": ["https://example.com/photo1.jpg"],
+  "createdAt": "2026-08-08T12:10:29Z",
+  "authorInfo": { "nickname": "바다", "reviewCount": 1, "level": 2 }
+}
+```
+검증 실패는 **400** + `{"error": "...", "message": "..."}`:
+`invalid_json` · `invalid_body`(객체 아님/길이 초과) · `missing_deviceId` · `invalid_deviceId` · `missing_locationNm` · `invalid_locationNm` · `missing_body` · `invalid_rating` · `invalid_contentId` · `invalid_authorNm` · `missing_authorNm`(처음 쓰는 기기인데 닉네임 없음) · `invalid_imageURLs`
+
+> ⚠️ **운영 주의.** 쓰기 API가 있으므로 `reviews`·`authors`의 소스는 관리형(prod) DB다.
+> `scripts/push-data.sh`의 파괴적 동기화 대상에서 두 테이블은 제외되어 있다 — 되돌리면 유저 리뷰가 소실된다.
+
 ## 예제
 ```bash
 KEY=mdw_xxx
@@ -118,7 +214,7 @@ const { total, items } = await res.json();
 ```
 
 ## 상태 코드
-`200` 성공 · `401` 인증 실패 · `404` 없음 · `429` 요청 초과 · `500` 서버오류 · `503` DB 다운
+`200` 성공 · `201` 생성됨(POST /v1/reviews) · `400` 잘못된 요청(필수 파라미터·검증 실패) · `401` 인증 실패 · `404` 없음 · `429` 요청 초과 · `500` 서버오류 · `503` DB 다운
 
 ## 데이터 출처·라이선스
 한국관광공사 TourAPI (data.go.kr). 표출 시 **출처 표시** 필요. 사진은 `image_copyright`(Type1=변경금지, Type3=출처표시) 준수.
