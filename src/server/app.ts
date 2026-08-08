@@ -36,6 +36,7 @@ export function buildApp(): Hono {
       'GET /v1/attractions/:hubTatsCd',
       'GET /v1/barrier-free?type=&region=&sigungu=&q=&hasImage=&hasAccess=&limit=&offset=',
       'GET /v1/barrier-free/:contentId',
+      'GET /v1/barrier-free/:contentId/related?limit=',
       'GET /v1/search?q=&limit=&offset=',
       'GET /v1/reviews?sort=recommended|latest&contentId=&limit=&offset=',
       'GET /v1/reviews/summary?contentId=',
@@ -213,6 +214,54 @@ export function buildApp(): Hono {
       homepage: extractUrl(detail?.homepage),
       tel: cleanIntroText(detail?.tel) ?? info.infocenter,
       basicInfo: { usetime: info.usetime, restdate: info.restdate, parking: info.parking, fee: info.fee },
+    });
+  });
+
+  // 함께 가볼만한 곳 — 018 이 미리 계산해 둔 연관 장소. 조회 시점에 357만 행을 매칭하면 느리다.
+  //  추천 대상은 전부 barrier_free 안에 있어서 카드를 누르면 위 상세 라우트로 이어진다.
+  //  source(rlte/nearby/...)를 그대로 내려보내 품질 편차를 클라이언트에서도 계량할 수 있게 한다.
+  v1.get('/barrier-free/:contentId/related', async (c) => {
+    const id = c.req.param('contentId');
+    // 캐러셀은 10장이면 충분하다. paging()의 기본 20 대신 10을 쓰되 상한은 그대로 100.
+    const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 10) || 10));
+
+    const rows = (await query<{
+      contentid: string; title: string | null; addr1: string | null;
+      firstimage: string | null; contenttypeid: string | null;
+      has_access: boolean | null; access_wheelchair: boolean | null; access_visual: boolean | null;
+      access_hearing: boolean | null; access_infant: boolean | null;
+      rank: number; source: string;
+    }>(`select b.contentid, b.title, b.addr1, b.firstimage, b.contenttypeid,
+               b.has_access, b.access_wheelchair, b.access_visual, b.access_hearing, b.access_infant,
+               r.rank, r.source
+          from related_places r
+          join barrier_free b on b.contentid = r.related_content_id
+         where r.content_id = $1
+         order by r.rank
+         limit $2`, [id, limit])).rows;
+
+    return c.json({
+      contentId: id,
+      limit,
+      count: rows.length,
+      items: rows.map((r) => ({
+        contentId: r.contentid,
+        title: r.title,
+        // 카드의 "경북 경주시" 자리. 원본 주소도 함께 내려 클라이언트가 고를 수 있게 한다.
+        region: shortRegion(r.addr1),
+        addr1: r.addr1,
+        imageURL: r.firstimage || null,
+        category: r.contenttypeid ? CATEGORY_LABELS[r.contenttypeid] ?? null : null,
+        hasAccess: r.has_access,
+        access: {
+          wheelchair: r.access_wheelchair,
+          visual: r.access_visual,
+          hearing: r.access_hearing,
+          infant: r.access_infant,
+        },
+        rank: r.rank,
+        source: r.source,
+      })),
     });
   });
 

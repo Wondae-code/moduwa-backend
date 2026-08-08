@@ -95,6 +95,32 @@ GET /v1/pet-friendly/1019041
 - `region`: 주소 축약("서울특별시 종로구 …" → "서울 종로구")
 - `access`: 접근성 배지 — 이동(wheelchair)·시각(visual)·청각(hearing)·영유아(infant) 정보 보유 여부
 
+### GET /v1/barrier-free/:contentId/related — 함께 가볼만한 곳
+장소 상세 하단 캐러셀용. `related_places`(018)에 미리 계산해 둔 연관 장소를 `rank` 순으로 반환한다.
+추천은 전부 무장애 장소(`barrier_free`) 안에 있어 카드를 누르면 `/v1/barrier-free/:contentId` 상세로 이어진다.
+
+| 파라미터 | 기본 | 설명 |
+|---|---|---|
+| `limit` | 10 | 1~100. 캐러셀은 10장으로 충분하다 |
+
+응답:
+```json
+{
+  "contentId": "126508", "limit": 10, "count": 10,
+  "items": [{
+    "contentId": "2762588", "title": "월정교",
+    "region": "경북 경주시", "addr1": "경북 경주시 교촌안길 27-11",
+    "imageURL": "https://tong.visitkorea.or.kr/...jpg",
+    "category": "관광지", "hasAccess": true,
+    "access": { "wheelchair": true, "visual": false, "hearing": false, "infant": true },
+    "rank": 1, "source": "rlte"
+  }]
+}
+```
+- `source`: 추천 유래 — `rlte`(한국관광데이터랩 연관관광지, 실제 동반방문 코스) / `nearby`(같은 시군구·같은 타입 근접) / `nearby_region`(시군구에 짝이 없어 광역 확장) / `nearby_national`(최후 수단). 품질 편차를 계량하기 위해 그대로 내려보낸다
+- 무장애 장소 10,248곳 **전부** 3장 이상, 98.5%가 10장을 확보한다. 다만 약 66%가 `nearby` 유래라 `rlte`가 없는 지방 소규모 장소는 추천이 심심할 수 있다
+- 파생 테이블이므로 `barrier_free`를 갱신하면 낡는다 → 로컬에서 018 재실행 후 `push-data.sh`
+
 ## 리뷰 (여행자 후기)
 
 TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장소 상세 '리뷰' 섹션에서 쓴다.
