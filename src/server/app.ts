@@ -74,6 +74,8 @@ export function buildApp(): Hono {
       'GET /v1/review-tags',
       'POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm, deviceId, tags?, wouldRevisit?, imageURLs?}',
       'POST /v1/reviews/images  (multipart, 필드명 files, 최대 5장·장당 2MB)',
+      'GET /v1/reviews/:reviewId/comments?limit=&offset=',
+      'POST /v1/reviews/:reviewId/comments  {body, authorNm?, deviceId}',
       'GET /images/reviews/:name  (업로드된 후기 사진 — 인증 불필요)',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
@@ -769,6 +771,121 @@ export function buildApp(): Hono {
 
     const row = (await query<ReviewRow>(`${REVIEW_SELECT} where r.id = $1`, [newId])).rows[0]!;
     return c.json(shapeReview(row), 201);
+  });
+
+  // ── 리뷰 댓글(020) ──────────────────────────────────────────────────────────
+  //  작성자 식별은 리뷰와 같다(기기 UUID + 닉네임 → authors 대리키). device_id 는 내보내지 않는다.
+  const MAX_COMMENT_LEN = 1000;
+
+  const COMMENT_SELECT = `
+    select c.id, c.body,
+           to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
+           a.nickname as author,
+           (select count(*)::int from reviews r2 where r2.author_id = c.author_id) as author_review_count
+      from review_comments c
+      join authors a on a.id = c.author_id`;
+
+  type CommentRow = Record<string, unknown> & { author: string; author_review_count: number | null };
+
+  const shapeComment = (row: CommentRow) => {
+    const { author_review_count: count, ...rest } = row;
+    const reviewCount = count ?? 0;
+    return {
+      ...rest,
+      authorInfo: { nickname: row.author, reviewCount, level: levelFor(reviewCount) },
+    };
+  };
+
+  /** 경로의 reviewId 를 정수로. 형식이 틀리면 null (404 로 응답한다). */
+  const parseReviewId = (raw: string): number | null => {
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+
+  // 댓글 목록 — 대화 순서(오래된 순). 리뷰가 없으면 404.
+  v1.get('/reviews/:reviewId/comments', async (c) => {
+    const reviewId = parseReviewId(c.req.param('reviewId'));
+    if (reviewId == null) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
+    const { limit, offset } = paging(c);
+
+    const exists = (await query<{ id: number }>('select id from reviews where id = $1', [reviewId])).rows[0];
+    if (!exists) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
+
+    const total = (await query<{ n: number }>(
+      'select count(*)::int n from review_comments where review_id = $1', [reviewId],
+    )).rows[0]!.n;
+    const rows = (await query<CommentRow>(
+      `${COMMENT_SELECT} where c.review_id = $1 order by c.created_at, c.id limit ${limit} offset ${offset}`,
+      [reviewId],
+    )).rows;
+    return c.json({ reviewId, total, limit, offset, count: rows.length, items: rows.map(shapeComment) });
+  });
+
+  // 댓글 작성
+  v1.post('/reviews/:reviewId/comments', async (c) => {
+    const reviewId = parseReviewId(c.req.param('reviewId'));
+    if (reviewId == null) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
+
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400);
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
+    }
+    const p = payload as Record<string, unknown>;
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+    const deviceId = str(p.deviceId);
+    const bodyText = str(p.body);
+    const authorNm = str(p.authorNm);
+
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId(기기 식별자)는 필수입니다.' }, 400);
+    if (deviceId.length > 128) return c.json({ error: 'invalid_deviceId', message: 'deviceId 는 128자 이하여야 합니다.' }, 400);
+    if (!bodyText) return c.json({ error: 'missing_body', message: '댓글 내용은 비어 있을 수 없습니다.' }, 400);
+    if (bodyText.length > MAX_COMMENT_LEN) {
+      return c.json({ error: 'invalid_body', message: `댓글은 ${MAX_COMMENT_LEN}자 이하여야 합니다.` }, 400);
+    }
+    if (authorNm.length > MAX_NICKNAME_LEN) {
+      return c.json({ error: 'invalid_authorNm', message: `authorNm 은 ${MAX_NICKNAME_LEN}자 이하여야 합니다.` }, 400);
+    }
+
+    const review = (await query<{ id: number }>('select id from reviews where id = $1', [reviewId])).rows[0];
+    if (!review) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
+
+    // 리뷰 작성과 같은 규칙 — 처음 쓰는 기기는 닉네임이 필수다.
+    const known = (await query<{ id: number }>('select id from authors where device_id = $1', [deviceId])).rows[0];
+    if (!known && !authorNm) {
+      return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
+    }
+
+    const newId = await withTransaction(async (client) => {
+      const author = authorNm
+        ? (await client.query<{ id: number }>(
+            `insert into authors (device_id, nickname) values ($1, $2)
+               on conflict (device_id) do update set nickname = excluded.nickname
+             returning id`, [deviceId, authorNm],
+          )).rows[0]
+        : (await client.query<{ id: number }>(
+            'select id from authors where device_id = $1', [deviceId],
+          )).rows[0];
+      if (!author) throw new Error('author_upsert_failed');
+
+      const inserted = (await client.query<{ id: number }>(
+        'insert into review_comments (review_id, author_id, body) values ($1, $2, $3) returning id',
+        [reviewId, author.id, bodyText],
+      )).rows[0]!;
+
+      // 목록 응답과 '추천순' 정렬이 읽는 카운터를 같은 트랜잭션에서 올린다 —
+      // 댓글은 늘었는데 화면의 댓글 수만 그대로인 상태를 만들지 않는다.
+      await client.query('update reviews set comment_count = comment_count + 1 where id = $1', [reviewId]);
+      return inserted.id;
+    });
+
+    const row = (await query<CommentRow>(`${COMMENT_SELECT} where c.id = $1`, [newId])).rows[0]!;
+    return c.json(shapeComment(row), 201);
   });
 
   app.route('/v1', v1);

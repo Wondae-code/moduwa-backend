@@ -304,6 +304,37 @@ curl -X POST "$BASE/v1/reviews" \
 ```
 태그는 리뷰와 **같은 트랜잭션**에서 저장된다 — 후기만 남고 태그가 빠지는 상태는 생기지 않는다.
 
+### GET /v1/reviews/:reviewId/comments — 댓글 목록
+리뷰 상세의 댓글. **대화 순서(오래된 순)** 로 반환한다. 없는 `reviewId`는 `404 {"error":"not_found"}`.
+
+```json
+{
+  "reviewId": 2, "total": 3, "limit": 20, "offset": 0, "count": 3,
+  "items": [{
+    "id": 3, "author": "민지",
+    "body": "실내라 비 오는 날에도 좋겠네요. 정보 감사합니다!",
+    "createdAt": "2026-08-06T04:13:13Z",
+    "authorInfo": { "nickname": "민지", "reviewCount": 1, "level": 2 }
+  }]
+}
+```
+
+### POST /v1/reviews/:reviewId/comments — 댓글 작성
+작성자 식별은 리뷰 작성과 **같은 규칙**이다 — 기기 UUID + 닉네임, 처음 쓰는 기기면 `authorNm` 필수.
+
+| 필드 | 필수 | 설명 |
+|---|---|---|
+| `deviceId` | ✅ | 기기 UUID(≤128자). 응답에 포함되지 않는다 |
+| `body` | ✅ | 댓글 내용(공백만이면 400, ≤1000자) |
+| `authorNm` | 조건부 | 닉네임(≤40자). 처음 쓰는 기기면 필수 |
+
+201로 생성된 댓글 한 건을 목록과 같은 형태로 반환한다.
+
+- **`reviews.comment_count`를 같은 트랜잭션에서 함께 올린다.** 댓글은 늘었는데 화면의 댓글 수만 그대로인 상태를 만들지 않는다
+- 카운터가 어긋나면 `npm run migrate`가 실제 댓글 수로 복구한다(`sql/020`의 마지막 update가 멱등)
+- ⚠️ 시드 리뷰의 `comment_count`는 원래 근거 없는 숫자(7·15·4·23·9·18·3)였다. 020에서 **실제 댓글 수로 덮었다** — "댓글 23"이 뜨는데 목록엔 2건만 나오는 상태를 없애기 위함이다
+- 댓글 수정·삭제 라우트는 없다
+
 ### POST /v1/reviews/images — 후기 사진 업로드
 `multipart/form-data`, 필드명 **`files`**(반복 가능). 작성 완료 **전에** 올려서 앱이 썸네일을 미리 보여줄 수 있게 한다. 응답의 `url`을 그대로 `POST /v1/reviews`의 `imageURLs`에 넣으면 된다.
 
