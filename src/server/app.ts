@@ -1,10 +1,41 @@
 // moduwa 관광 데이터 REST API — Hono
 //  조회는 전부 읽기 전용. 예외적으로 리뷰(POST /v1/reviews)만 쓰기를 허용한다.
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { query, withTransaction } from '../db';
 import { apiKeyAuth, rateLimit } from './middleware';
+
+// ── 후기 사진 저장 ────────────────────────────────────────────────────────────
+//  파일명은 내용의 sha256. 같은 사진을 두 번 올려도 한 번만 저장되고 이름이 충돌하지
+//  않으며, 내용이 곧 이름이므로 캐시를 영구(immutable)로 걸 수 있다.
+//  해시를 두 단계 디렉터리로 쪼개는 것은 한 폴더에 파일이 수만 개 쌓이는 것을 피하기 위함.
+const IMAGE_TYPES = [
+  { ext: 'jpg', mime: 'image/jpeg', match: (b: Buffer) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: 'png', mime: 'image/png', match: (b: Buffer) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
+  // HEIC: 4~8바이트가 'ftyp', 그 뒤 브랜드가 heic/heix/hevc/mif1
+  {
+    ext: 'heic',
+    mime: 'image/heic',
+    match: (b: Buffer) => b.subarray(4, 8).toString('latin1') === 'ftyp'
+      && ['heic', 'heix', 'hevc', 'mif1'].includes(b.subarray(8, 12).toString('latin1')),
+  },
+] as const;
+
+/** 확장자·Content-Type 을 믿지 않고 실제 바이트로 판별한다. 이미지가 아니면 null. */
+function sniffImage(buf: Buffer): { ext: string; mime: string } | null {
+  if (buf.length < 12) return null;
+  const hit = IMAGE_TYPES.find((t) => t.match(buf));
+  return hit ? { ext: hit.ext, mime: hit.mime } : null;
+}
+
+function imagePathFor(name: string): string {
+  // 해시 기반이라 이름에 경로 문자가 들어올 수 없지만, 외부 입력이므로 형식을 강제한다.
+  return join(config.api.uploadDir, 'reviews', name.slice(0, 2), name.slice(2, 4), name);
+}
 
 // 페이지네이션 파라미터 파싱 (limit 1~100, offset ≥0)
 function paging(c: { req: { query: (k: string) => string | undefined } }): { limit: number; offset: number } {
@@ -41,10 +72,36 @@ export function buildApp(): Hono {
       'GET /v1/reviews?sort=recommended|likes|latest&contentId=&hasImage=&limit=&offset=',
       'GET /v1/reviews/summary?contentId=',
       'GET /v1/review-tags',
-      'POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm, deviceId, imageURLs?}',
+      'POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm, deviceId, tags?, wouldRevisit?, imageURLs?}',
+      'POST /v1/reviews/images  (multipart, 필드명 files, 최대 5장·장당 2MB)',
+      'GET /images/reviews/:name  (업로드된 후기 사진 — 인증 불필요)',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
   }));
+
+  // 업로드된 후기 사진 서빙 — **인증 없이** 연다.
+  //  iOS 의 AsyncImage 는 Authorization 헤더를 붙이지 않으므로 /v1/* 아래 두면 이미지가
+  //  전부 401 이 된다. 후기 사진은 앱에 공개로 노출되는 콘텐츠이고 파일명이 sha256 이라
+  //  URL 을 모르면 접근할 수 없다.
+  app.get('/images/reviews/:name', async (c) => {
+    const name = c.req.param('name');
+    // 해시 기반 이름만 허용 — 경로 조작(../)을 원천 차단한다.
+    if (!/^[0-9a-f]{64}\.(jpg|png|heic)$/.test(name)) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    const ext = name.split('.').pop()!;
+    const mime = IMAGE_TYPES.find((t) => t.ext === ext)?.mime ?? 'application/octet-stream';
+    try {
+      const buf = await readFile(imagePathFor(name));
+      return c.body(new Uint8Array(buf), 200, {
+        'Content-Type': mime,
+        // 내용이 곧 이름이라 같은 URL 의 내용은 절대 바뀌지 않는다.
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+    } catch {
+      return c.json({ error: 'not_found' }, 404);
+    }
+  });
   app.get('/health', async (c) => {
     try {
       await query('select 1');
@@ -502,6 +559,80 @@ export function buildApp(): Hono {
       ratedCount: row.rated_count,
       tags,
     });
+  });
+
+  // 후기 사진 업로드 — 작성 완료 전에 올려서 앱이 썸네일을 미리 보여줄 수 있게 한다.
+  //  반환된 URL 을 POST /v1/reviews 의 imageURLs 에 그대로 넣으면 된다.
+  //
+  //  ⚠️ 서버는 리사이즈하지 않는다. iOS 가 장변 1280px·JPEG q0.8 로 줄여서 올린다 —
+  //     sharp 같은 네이티브 의존성을 Docker 에 넣지 않아도 되고, 모바일 업로드도 빨라지며,
+  //     재인코딩 과정에서 GPS 등 EXIF 가 사라지는 프라이버시 이점까지 따라온다.
+  v1.post('/reviews/images', async (c) => {
+    // 볼륨이 안 붙은 채 배포되면 컨테이너 임시 파일시스템에 쓰게 되고, 재배포 때 사진이
+    // 조용히 사라진다. 그 상태를 숨기지 말고 503 으로 드러낸다.
+    const probeDir = join(config.api.uploadDir, 'reviews');
+    try {
+      await mkdir(probeDir, { recursive: true });
+    } catch {
+      return c.json({
+        error: 'storage_unavailable',
+        message: `업로드 저장소(${config.api.uploadDir})에 쓸 수 없습니다. 볼륨 마운트를 확인하세요.`,
+      }, 503);
+    }
+
+    const contentLength = Number(c.req.header('content-length') ?? 0);
+    if (contentLength > config.api.maxUploadBytes) {
+      return c.json({
+        error: 'payload_too_large',
+        message: `요청 전체는 ${Math.round(config.api.maxUploadBytes / 1024 / 1024)}MB 이하여야 합니다.`,
+      }, 413);
+    }
+
+    let form: Record<string, unknown>;
+    try {
+      form = await c.req.parseBody({ all: true });
+    } catch {
+      return c.json({ error: 'invalid_multipart', message: 'multipart/form-data 로 보내주세요.' }, 400);
+    }
+
+    const raw = form.files ?? form.file;
+    const files = (Array.isArray(raw) ? raw : [raw]).filter((f): f is File => f instanceof File);
+    if (files.length === 0) {
+      return c.json({ error: 'missing_files', message: "파일을 'files' 필드로 보내주세요." }, 400);
+    }
+    if (files.length > MAX_IMAGES) {
+      return c.json({ error: 'too_many_files', message: `사진은 최대 ${MAX_IMAGES}장까지 가능합니다.` }, 400);
+    }
+
+    const origin = `${c.req.header('x-forwarded-proto') ?? new URL(c.req.url).protocol.replace(':', '')}://${c.req.header('host')}`;
+    const items: { url: string; bytes: number; type: string }[] = [];
+
+    for (const file of files) {
+      // 디스크에 쓰기 전에 크기부터 본다.
+      if (file.size > config.api.maxImageBytes) {
+        return c.json({
+          error: 'image_too_large',
+          message: `사진 한 장은 ${Math.round(config.api.maxImageBytes / 1024 / 1024)}MB 이하여야 합니다. 앱이 올리기 전에 줄여야 합니다.`,
+        }, 400);
+      }
+      const buf = Buffer.from(await file.arrayBuffer());
+      const kind = sniffImage(buf);
+      if (!kind) {
+        return c.json({
+          error: 'invalid_image',
+          message: '이미지 파일이 아닙니다(JPEG·PNG·HEIC 만 지원).',
+        }, 400);
+      }
+
+      const name = `${createHash('sha256').update(buf).digest('hex')}.${kind.ext}`;
+      const path = imagePathFor(name);
+      await mkdir(dirname(path), { recursive: true });
+      // 같은 내용이면 이미 있는 파일을 덮어쓸 뿐이라 중복 저장이 생기지 않는다.
+      await writeFile(path, buf);
+      items.push({ url: `${origin}/images/reviews/${name}`, bytes: buf.length, type: kind.mime });
+    }
+
+    return c.json({ count: items.length, items }, 201);
   });
 
   // 리뷰 작성 — 유일한 쓰기 엔드포인트. 인증·레이트리밋은 /v1/* 공통(Bearer API 키) 그대로.

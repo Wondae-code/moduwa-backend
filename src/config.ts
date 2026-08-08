@@ -59,6 +59,17 @@ export const config = {
     allowedOrigins: (process.env.ALLOWED_ORIGINS ?? '*').split(',').map((s) => s.trim()).filter(Boolean),
     // 키당 분당 요청 상한.
     rateLimitPerMin: num('RATE_LIMIT_PER_MIN', 120),
+
+    // ── 후기 사진 업로드 ──
+    // Railway 볼륨 마운트 경로. 이 디렉터리에 쓸 수 없으면 업로드는 503 으로 명확히
+    // 실패한다 — 컨테이너 임시 파일시스템에 조용히 쓰면 재배포 때 사진이 사라지는데
+    // 그게 조용히 일어나는 게 최악이다.
+    uploadDir: process.env.UPLOAD_DIR?.trim() || '/data',
+    // 장당 상한. iOS 가 장변 1280px·JPEG q0.8 로 줄여 올리므로 실제로는 200~450KB다.
+    // 예상치의 4~5배로 두어 정상 업로드를 막지 않으면서 방어선 역할만 하게 한다.
+    maxImageBytes: num('MAX_IMAGE_BYTES', 2 * 1024 * 1024),
+    // 요청 전체 상한(5장 × 2MB).
+    maxUploadBytes: num('MAX_UPLOAD_BYTES', 10 * 1024 * 1024),
   },
 };
 

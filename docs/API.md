@@ -303,6 +303,44 @@ curl -X POST "$BASE/v1/reviews" \
   }'
 ```
 태그는 리뷰와 **같은 트랜잭션**에서 저장된다 — 후기만 남고 태그가 빠지는 상태는 생기지 않는다.
+
+### POST /v1/reviews/images — 후기 사진 업로드
+`multipart/form-data`, 필드명 **`files`**(반복 가능). 작성 완료 **전에** 올려서 앱이 썸네일을 미리 보여줄 수 있게 한다. 응답의 `url`을 그대로 `POST /v1/reviews`의 `imageURLs`에 넣으면 된다.
+
+| 제한 | 값 |
+|---|---|
+| 장당 크기 | **2MB** |
+| 요청 전체 | **10MB** |
+| 장수 | 5장 |
+| 포맷 | JPEG · PNG · HEIC |
+
+```bash
+curl -X POST "$BASE/v1/reviews/images" \
+  -H "Authorization: Bearer $KEY" \
+  -F "files=@photo1.jpg" -F "files=@photo2.jpg"
+```
+```json
+{
+  "count": 1,
+  "items": [{
+    "url": "https://…/images/reviews/d20f6ffd…13ab.jpg",
+    "bytes": 284310, "type": "image/jpeg"
+  }]
+}
+```
+
+- **서버는 리사이즈하지 않는다.** 클라이언트가 **장변 1280px · JPEG q0.8**로 줄여서 올린다. 앱에서 사진을 가장 크게 쓰는 곳이 393×260pt(3x에서 약 1179px)라 그 이상은 저장할 이유가 없다. 서버에서 줄이려면 `sharp` 같은 네이티브 의존성이 필요하고, 클라이언트에서 줄이면 업로드도 빨라지며 **재인코딩 과정에서 GPS 등 EXIF가 사라지는** 이점까지 따라온다
+- 2MB 상한은 위 규격 실제 크기(200~450KB)의 4~5배다. 정상 업로드를 막지 않으면서 방어선 역할만 한다
+- **파일명은 내용의 sha256.** 같은 사진을 두 번 올려도 한 번만 저장되고 URL도 같다
+- **확장자·Content-Type을 믿지 않고 실제 바이트(매직 넘버)로 판별**한다. 텍스트 파일을 `.jpg`로 올리면 400
+- 저장소(Railway 볼륨 `/data`)에 쓸 수 없으면 **503**. 컨테이너 임시 파일시스템에 조용히 쓰면 재배포 때 사진이 사라지므로 일부러 드러낸다
+- ⚠️ 볼륨에만 존재하고 **백업이 없다.** 시연 자료로 쓸 사진이면 따로 보관할 것
+
+### GET /images/reviews/:name — 업로드된 사진 (인증 불필요)
+**`/v1/*`가 아니라 공개 경로다.** iOS `AsyncImage`는 `Authorization` 헤더를 붙이지 않아 인증 경로에 두면 이미지가 전부 401이 된다. 후기 사진은 앱에 공개로 노출되는 콘텐츠이고, 파일명이 sha256이라 URL을 모르면 접근할 수 없다.
+
+- `Cache-Control: public, max-age=31536000, immutable` — 내용이 곧 이름이라 같은 URL의 내용은 절대 바뀌지 않는다
+- 이름이 `[0-9a-f]{64}.(jpg|png|heic)` 형식이 아니면 404. 경로 조작(`../`)은 이 검사에서 막힌다
 **201** + 생성된 리뷰 1건(GET 목록 item과 같은 형태, `authorInfo` 포함):
 ```json
 {
