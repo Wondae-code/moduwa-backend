@@ -24,7 +24,13 @@ set -euo pipefail
 #     authors 를 포함하면 reviews.author_id 참조까지 함께 날아간다(복구 불가).
 #     → 리뷰 스키마 변경은 데이터 동기화가 아니라 prod 에 마이그레이션(npm run migrate)으로 반영한다.
 #     (012_reviews.sql 상단 경고 참고)
-TABLES="pet_tour_poi pet_tour_detail kor_with_detail kor_detail locgo_hub_detail barrier_free"
+#
+#  ✅ related_places 는 반대로 반드시 포함해야 한다 — 로컬이 소스다.
+#     018 이 이 테이블을 tar_rlte_records(357만행, 로컬 전용)로 계산하는데 관리형 DB 에는
+#     그 원천 테이블이 없다. 즉 prod 에서 npm run migrate 로 재계산하는 것은 불가능하고
+#     (relation "tar_rlte_records" does not exist), 계산 결과를 데이터로 실어 보내는 길밖에 없다.
+#     → barrier_free 를 갱신했으면 로컬에서 018 을 재실행한 뒤 이 스크립트를 돌린다.
+TABLES="pet_tour_poi pet_tour_detail kor_with_detail kor_detail locgo_hub_detail barrier_free related_places"
 DUMP="/tmp/moduwa-slim-$(date +%Y%m%d%H%M%S).sql"
 trap 'rm -f "$DUMP"' EXIT
 
