@@ -36,6 +36,9 @@
 | **반려동물 동반여행(KorPetTour)** | `ingest:pet`, `ingest:pet-detail` | `pet_tour_poi`, `pet_tour_detail` | 동반유형·동반가능동물 |
 
 ### API가 노출하는 것 (슬림)
+- `barrier_free` — **앱의 핵심 데이터셋.** 무장애 여행 장소 10,248곳 + 무장애 28속성(자유 텍스트). `kor_detail` 조인으로 개요·기본정보까지 상세에 붙는다
+- `related_places` — "함께 가볼만한 곳" 연관 장소 102,330쌍. 위 10,248곳 **전부**가 추천 3장 이상을 갖는다
+- `reviews` / `authors` — 여행자 후기. TourAPI에 없는 자체 데이터이고 **유일하게 쓰기가 가능한 리소스**다
 - `pet_friendly_view` — 반려동물 동반 관광지 9,767곳 + 안내견(무장애) + 개요·운영시간을 `content_id`로 결합
 - `locgo_hub_detail` — 지역 대표 관광지 54,478곳(카카오/네이버 지도링크 100% + TourAPI 소개·사진 + 카카오 전화·업종)
 
@@ -80,10 +83,28 @@ npm run api                   # API 로컬 실행 (기본 :8080)
 TARGET_DATABASE_URL="<관리형 공개 URL>" bash scripts/push-data.sh
 # 자동: .env 에 MANAGED_DATABASE_URL 설정 → daily-ingest.sh 가 매일 동기화
 ```
-무중단(단일 트랜잭션 교체)이라 동기화 중에도 API는 기존 데이터를 계속 서비스한다.
+테이블을 하나씩 순차로 교체하고(각각 단일 트랜잭션) 사이사이 `checkpoint`를 넣는다. 볼륨 요구가 "전체 2배"가 아니라 "가장 큰 테이블 1개"라 Railway 소형 볼륨에서도 끝난다.
+
+**동기화 전후로 확인할 것**
+- 🚫 **`reviews`/`authors`는 동기화 대상이 아니다.** 쓰기 API가 생긴 뒤로 이 둘은 관리형이 소스다. `TABLES`에 넣으면 유저가 작성한 후기가 통째로 소실된다(복구 불가). 리뷰 스키마 변경은 데이터 push가 아니라 관리형에 마이그레이션으로 반영한다.
+- ⚠️ **`related_places`는 로컬이 소스다.** 원천 테이블(`tar_rlte_records`)이 관리형에 없어 거기서 재계산할 수 없다. `barrier_free`를 갱신했으면 **로컬에서 `sql/018`을 재실행한 뒤** push해야 추천이 낡지 않는다.
+- 🐛 **`pet_friendly_view` 생존 확인은 필수다.** 스크립트가 ①에서 이 뷰를 drop하고 ③에서야 재생성하므로, 동기화 중에는 `/v1/pet-friendly`가 내려가고 **중간에 실패하면 뷰가 없는 상태로 남는다.** 실제로 2026-08-08에 관리형에서 이 뷰가 사라진 채 발견돼 해당 엔드포인트가 죽어 있었다. 동기화 후 아래로 확인하고, 없으면 `sql/010`을 재적용한다.
+  ```bash
+  psql "$TARGET_DATABASE_URL" -c "select count(*) from pet_friendly_view;"
+  ```
 
 ## REST API
-읽기 전용. `/v1/*`는 **API 키 필수**(`Authorization: Bearer <key>`), 키 없으면 401. → **[docs/API.md](docs/API.md)**
+`/v1/*`는 **API 키 필수**(`Authorization: Bearer <key>`), 키 없으면 401. 전체 스펙 → **[docs/API.md](docs/API.md)**
+
+| | 엔드포인트 | 용도 |
+|---|---|---|
+| GET | `/v1/barrier-free`<br>`/v1/barrier-free/:contentId` | 무장애 장소 목록·상세(28속성 + 개요·기본정보). 앱 홈 피드와 장소 상세 |
+| GET | `/v1/barrier-free/:contentId/related` | 함께 가볼만한 곳 캐러셀 |
+| GET | `/v1/search` | 통합 검색(관련성 정렬) |
+| GET | `/v1/reviews`<br>`/v1/reviews/summary` | 여행자 후기 목록(장소별 필터 가능)·장소 단위 전체 평점 |
+| **POST** | `/v1/reviews` | **후기 작성.** 이 API의 유일한 쓰기 |
+| GET | `/v1/pet-friendly`<br>`/v1/pet-friendly/:contentId` | 반려동물 동반 가능 장소 |
+| GET | `/v1/attractions`<br>`/v1/attractions/:hubTatsCd` | 지역 대표 관광지(지도 딥링크·사진) |
 
 배포 URL: `https://moduwa-backend-production.up.railway.app`
 

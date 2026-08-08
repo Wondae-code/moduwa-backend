@@ -132,6 +132,21 @@ export function buildApp(): Hono {
     stroller, lactationroom, babysparechair, infantsfamilyetc,
     has_image, has_access`;
 
+  // 무장애 28속성 중 몇 개가 채워져 있는지. 값은 전부 자유 텍스트고 빈 문자열 없이 null 뿐이라
+  // null 여부만 세면 된다. 정보가 풍부한 장소일수록 접근성 판단에 쓸모가 있으므로 기본 정렬 키다.
+  const ACCESS_SCORE = `(
+    (parking is not null)::int + (route is not null)::int + (publictransport is not null)::int
+  + (ticketoffice is not null)::int + (promotion is not null)::int + (wheelchair is not null)::int
+  + (exit is not null)::int + (elevator is not null)::int + (restroom is not null)::int
+  + (auditorium is not null)::int + (room is not null)::int + (handicapetc is not null)::int
+  + (braileblock is not null)::int + (helpdog is not null)::int + (guidehuman is not null)::int
+  + (audioguide is not null)::int + (bigprint is not null)::int + (brailepromotion is not null)::int
+  + (guidesystem is not null)::int + (blindhandicapetc is not null)::int
+  + (signguide is not null)::int + (videoguide is not null)::int + (hearingroom is not null)::int
+  + (hearinghandicapetc is not null)::int
+  + (stroller is not null)::int + (lactationroom is not null)::int
+  + (babysparechair is not null)::int + (infantsfamilyetc is not null)::int)`;
+
   v1.get('/barrier-free', async (c) => {
     const { limit, offset } = paging(c);
     const where: string[] = [];
@@ -145,12 +160,32 @@ export function buildApp(): Hono {
     if (c.req.query('hasImage') === 'true') where.push('has_image');
     if (c.req.query('hasAccess') === 'true') where.push('has_access');
 
+    // 정렬. 구 기본값(has_image desc, has_access desc, contentid)은 앱이 hasImage/hasAccess 를
+    // 이미 필터로 걸고 부르기 때문에 앞의 두 키가 결과 안에서 상수가 되어, 사실상 contentid 순
+    // 고정이었다 — "추천"이 언제나 같은 6곳을 내주던 원인이다. 기본을 access 로 바꾼다.
+    //  어느 정렬이든 마지막 키를 contentid 로 고정해야 offset 페이지네이션이 어긋나지 않는다.
+    const sort = c.req.query('sort') ?? 'access';
+    const orderParams = [...params];
+    let orderBy: string;
+    switch (sort) {
+      case 'id':     // 구 동작 복원용
+        orderBy = 'contentid';
+        break;
+      case 'random': // seed 를 주면 매 요청 같은 순서 — 페이지를 넘겨도 목록이 흔들리지 않는다
+        orderParams.push(c.req.query('seed') ?? '0');
+        orderBy = `md5(contentid || $${orderParams.length}), contentid`;
+        break;
+      default:       // 'access'
+        orderBy = `${ACCESS_SCORE} desc, contentid`;
+    }
+
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
+    // count 에는 정렬용 파라미터를 넘기지 않는다(바인딩 개수가 어긋난다)
     const total = (await query<{ n: number }>(`select count(*)::int n from barrier_free ${wsql}`, params)).rows[0]!.n;
     const rows = (await query(
-      `select ${BF_COLS} from barrier_free ${wsql} order by has_image desc, has_access desc, contentid limit ${limit} offset ${offset}`, params,
+      `select ${BF_COLS} from barrier_free ${wsql} order by ${orderBy} limit ${limit} offset ${offset}`, orderParams,
     )).rows;
-    return c.json({ total, limit, offset, count: rows.length, items: rows });
+    return c.json({ total, limit, offset, count: rows.length, sort, items: rows });
   });
 
   // TourAPI 텍스트 정리: <br> → ' / ', 태그 제거, 엔티티·공백 정리

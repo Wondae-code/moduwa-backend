@@ -70,6 +70,70 @@ GET /v1/pet-friendly/1019041
 
 ### GET /v1/attractions/:hubTatsCd — 단건
 
+### GET /v1/barrier-free — 무장애 여행 장소 목록
+앱의 핵심 데이터셋. `barrier_free` 대상(관광지·숙박·음식점·축제 등 10,248곳). 사진 보유 → 접근성 정보 보유 → contentid 순으로 정렬한다.
+
+| 파라미터 | 예시 | 설명 |
+|---|---|---|
+| `type` | `12` | 콘텐츠유형(12관광지·14문화시설·15축제공연행사·25여행코스·28레포츠·32숙박·38쇼핑·39음식점) |
+| `region` | `11` | 법정동 시도코드(`ldong_regn_cd`, 2자리) |
+| `sigungu` | `110` | 법정동 시군구코드(`ldong_signgu_cd`, 3자리) |
+| `q` | `경복궁` | 이름 부분 일치(`ilike`) |
+| `hasImage` | `true` | 대표사진 보유만 |
+| `hasAccess` | `true` | 접근성 정보 보유만 |
+| `sort` | `access` | 정렬 방식(아래) |
+| `seed` | `42` | `sort=random`일 때만 의미 있음 |
+| `limit`/`offset` | | 페이지네이션(limit 기본 20, 최대 100) |
+
+**정렬(`sort`)**
+
+| 값 | 동작 |
+|---|---|
+| `access` (기본) | 무장애 28속성 중 **채워진 개수가 많은 순**. 접근성 정보가 풍부한 장소를 우선 노출한다 |
+| `random` | `seed` 기준 의사난수 순. **같은 seed면 항상 같은 순서**라 페이지를 넘겨도 목록이 흔들리지 않는다 |
+| `id` | `contentid` 오름차순 (구 동작 복원용) |
+
+> 2026-08-08에 기본 정렬이 `id`류에서 `access`로 바뀌었다. 구 기본값은 `has_image desc, has_access desc, contentid`였는데, 호출부가 `hasImage`/`hasAccess`를 필터로 이미 걸면 앞의 두 키가 결과 집합 안에서 상수가 되어 **사실상 `contentid` 순 고정**이었다. 앱 홈 피드의 "맞춤 추천"이 언제나 같은 장소만 보여주던 원인이다.
+> 어느 정렬이든 마지막 키는 `contentid`로 고정되므로 offset 페이지네이션은 안정적이다.
+
+응답은 `{total, limit, offset, count, sort, items}`. item은 DB 컬럼을 그대로 내려보내는 **snake_case**다:
+
+```json
+{
+  "total": 10248, "limit": 20, "offset": 0, "count": 20,
+  "items": [{
+    "contentid": "126508", "title": "경복궁", "contenttypeid": "12",
+    "addr1": "서울특별시 종로구 사직로 161", "addr2": "",
+    "mapx": "126.9769930325", "mapy": "37.5760836609",
+    "firstimage": "https://tong.visitkorea.or.kr/...jpg", "firstimage2": "...",
+    "ldong_regn_cd": "11", "ldong_signgu_cd": "110",
+    "parking": "장애인 전용 주차구역 있음(주차장 3면)", "route": "...", "restroom": "...",
+    "braileblock": null, "helpdog": "안내견 동반 가능", "signguide": null, "stroller": "유모차 대여 가능",
+    "has_image": true, "has_access": true
+  }]
+}
+```
+
+**무장애 28개 속성은 boolean이 아니라 자유 텍스트다.** 채워져 있으면 시설 설명, `null`이면 정보 미제공이라는 뜻이다. 필드별 의미와 장애 유형별 그룹(지체·공통 이동 12 / 시각 8 / 청각 4 / 영유아 4)은 → **[docs/barrier-free-detail-fields.md](barrier-free-detail-fields.md)**
+
+> ⚠️ 이 라우트와 아래 상세 라우트는 `access` 요약 객체를 내려보내지 **않는다.** 클라이언트가 28개 텍스트 필드를 직접 그룹핑해야 한다. 배지용 boolean 요약(`access.wheelchair` 등)이 필요하면 `/v1/search` 와 `/v1/barrier-free/:contentId/related` 응답에 들어 있다.
+
+### GET /v1/barrier-free/:contentId — 장소 상세
+목록과 같은 필드에 `kor_detail`을 조인해 개요·홈페이지·전화·기본정보를 덧붙인다. 없는 `contentId`는 `404 {"error":"not_found"}`.
+
+```json
+{
+  "contentid": "126508", "title": "경복궁", "…": "목록과 동일한 필드 전체",
+  "overview": "경복궁은 조선 왕조 제일의 법궁이다. …",
+  "homepage": "https://www.royalpalace.go.kr",
+  "tel": "02-3700-3900",
+  "basicInfo": { "usetime": "09:00~18:00", "restdate": "화요일", "parking": "가능", "fee": null }
+}
+```
+- `overview`/`homepage`/`tel`은 원문에서 HTML 태그·엔티티를 정리해 내려보낸다(`homepage`는 `<a href>`에서 URL만 추출)
+- `basicInfo`는 TourAPI `detailIntro2`의 **타입별로 다른 필드**를 공통 스키마로 정규화한 것이다 — 숙박(32)은 입실/퇴실을 `usetime`으로, 음식점(39)은 `opentimefood`/`restdatefood`, 축제(15)는 공연시간이 없으면 행사기간으로 대체하고 `fee`에 요금을 담는다
+- ⚠️ **커버리지 주의**: `kor_detail`은 관광지(12) 위주로 수집돼 있다. 숙박·음식점·축제는 `overview`/`basicInfo`가 `null`인 경우가 많으므로 클라이언트는 값이 없는 섹션을 숨겨야 한다
+
 ### GET /v1/search — 통합 검색 (검색 페이지용)
 무장애 장소(barrier_free) 대상. 이름 부분 일치 + 지역명(주소) 매칭, 관련성 정렬(정확 > 접두 > 부분 > 지역, 동순위는 사진·접근성 정보 보유 우선).
 
