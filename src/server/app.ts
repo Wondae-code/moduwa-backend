@@ -38,8 +38,9 @@ export function buildApp(): Hono {
       'GET /v1/barrier-free/:contentId',
       'GET /v1/barrier-free/:contentId/related?limit=',
       'GET /v1/search?q=&limit=&offset=',
-      'GET /v1/reviews?sort=recommended|latest&contentId=&limit=&offset=',
+      'GET /v1/reviews?sort=recommended|likes|latest&contentId=&hasImage=&limit=&offset=',
       'GET /v1/reviews/summary?contentId=',
+      'GET /v1/review-tags',
       'POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm, deviceId, imageURLs?}',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
@@ -393,9 +394,18 @@ export function buildApp(): Hono {
            r.like_count as "likeCount", r.comment_count as "commentCount",
            r.is_accessibility_verified as "isAccessibilityVerified",
            r.image_urls as "imageURLs",
+           r.would_revisit as "wouldRevisit",
            to_char(r.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            a.nickname as author_nickname,
-           (select count(*)::int from reviews r2 where r2.author_id = r.author_id) as author_review_count
+           (select count(*)::int from reviews r2 where r2.author_id = r.author_id) as author_review_count,
+           -- 후기 뱃지용 태그(019). 시안은 뱃지에 짧은 이름을 쓰지만 긴 이름도 함께 보내
+           -- 클라이언트가 상황에 맞게 고르게 한다. 태그가 없으면 빈 배열.
+           (select coalesce(json_agg(json_build_object(
+                     'code', d.code, 'label', d.label,
+                     'shortLabel', d.short_label, 'icon', d.icon
+                   ) order by d.sort_order), '[]'::json)
+              from review_tags rt join review_tag_defs d on d.code = rt.tag_code
+             where rt.review_id = r.id) as tags
       from reviews r
       left join authors a on a.id = r.author_id`;
 
@@ -418,15 +428,25 @@ export function buildApp(): Hono {
   };
 
   // 리뷰 목록 — iOS TravelReview 필드명으로 매핑. contentId 로 장소별 필터.
+  //  정렬: recommended(기본, 좋아요+댓글) / likes(좋아요만 — 시안의 "좋아요 순") / latest.
+  //   ⚠️ likes 와 recommended 를 같은 것으로 취급하지 말 것. 시안이 요구하는 건 좋아요 순이고
+  //      recommended 는 댓글까지 더한 값이라 순서가 다르게 나온다.
+  const REVIEW_ORDERS: Record<string, string> = {
+    latest: 'r.created_at desc',
+    likes: 'r.like_count desc, r.created_at desc',
+    recommended: '(r.like_count + r.comment_count) desc, r.created_at desc',
+  };
+
   v1.get('/reviews', async (c) => {
     const { limit, offset } = paging(c);
-    const order = c.req.query('sort') === 'latest'
-      ? 'r.created_at desc'
-      : '(r.like_count + r.comment_count) desc, r.created_at desc'; // recommended(기본)
+    const sort = c.req.query('sort') ?? 'recommended';
+    const order = REVIEW_ORDERS[sort] ?? REVIEW_ORDERS.recommended;
     const where: string[] = [];
     const params: unknown[] = [];
     const contentId = c.req.query('contentId');
     if (contentId) { params.push(contentId); where.push(`r.content_id = $${params.length}`); }
+    // 시안의 "사진/영상 후기만 보기". image_urls 가 null 인 행도 있어 coalesce 로 감싼다.
+    if (c.req.query('hasImage') === 'true') where.push('coalesce(array_length(r.image_urls, 1), 0) > 0');
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
 
     // count 도 같은 별칭(r)을 써서 wsql 을 그대로 공유한다.
@@ -434,7 +454,18 @@ export function buildApp(): Hono {
     const rows = (await query<ReviewRow>(
       `${REVIEW_SELECT} ${wsql} order by ${order} limit ${limit} offset ${offset}`, params,
     )).rows;
-    return c.json({ total, limit, offset, count: rows.length, items: rows.map(shapeReview) });
+    return c.json({ total, limit, offset, sort, count: rows.length, items: rows.map(shapeReview) });
+  });
+
+  // 후기 태그 카탈로그(019) — 작성 화면의 "어떤 점이 좋았나요?" 칩 목록.
+  //  DB 가 원본이라 문구·순서·아이콘이 바뀌어도 앱 재배포가 필요 없다.
+  //  icon 이 null 인 태그는 아직 브랜드 에셋이 없다는 뜻 — 클라이언트는 텍스트만 렌더한다.
+  v1.get('/review-tags', async (c) => {
+    const rows = (await query(
+      `select code, label, short_label as "shortLabel", icon
+         from review_tag_defs order by sort_order, code`,
+    )).rows;
+    return c.json({ count: rows.length, items: rows });
   });
 
   // 장소 단위 전체 평점 — 시안 "★ 4.3 · 후기 235"
@@ -451,11 +482,25 @@ export function buildApp(): Hono {
               round(avg(rating)::numeric, 1)::float8 as avg_rating
          from reviews where content_id = $1`, [contentId],
     )).rows[0]!;
+    // 태그 집계 막대 — 시안의 "♿ 무장애 친화적이에요 … 21명".
+    //  ⚠️ 시안 주석의 "20명 이상만 노출" 임계값은 적용하지 않는다(개발 단계에서 20명을
+    //     채울 수 없어 막대가 전부 사라진다). 노출 기준은 클라이언트가 정하게 두고
+    //     서버는 전부 내려보낸다. 정렬은 시안처럼 인원 많은 순.
+    const tags = (await query(
+      `select d.code, d.label, d.short_label as "shortLabel", d.icon, count(*)::int as count
+         from review_tags rt
+         join reviews r        on r.id = rt.review_id
+         join review_tag_defs d on d.code = rt.tag_code
+        where r.content_id = $1
+        group by d.code, d.label, d.short_label, d.icon, d.sort_order
+        order by count desc, d.sort_order`, [contentId],
+    )).rows;
     return c.json({
       contentId,
       avgRating: row.avg_rating,
       reviewCount: row.review_count,
       ratedCount: row.rated_count,
+      tags,
     });
   });
 
@@ -465,6 +510,7 @@ export function buildApp(): Hono {
   const MAX_BODY_LEN = 2000;
   const MAX_IMAGES = 5;      // 앱 리뷰 카드가 1~5장 레이아웃 기준(014 참고)
   const MAX_NICKNAME_LEN = 40;
+  const MAX_TAGS = 8;        // 카탈로그 전체 개수. 전부 고르는 것까지는 허용한다
 
   v1.post('/reviews', async (c) => {
     let payload: unknown;
@@ -516,6 +562,42 @@ export function buildApp(): Hono {
       }
     }
 
+    // 태그(019) — 카탈로그에 있는 code 만 받는다. 모르는 code 를 조용히 버리면 사용자가
+    //  고른 태그가 왜 사라졌는지 알 수 없으므로 400 으로 알린다. 중복은 알아서 제거한다.
+    let tagCodes: string[] = [];
+    const rawTags = p.tags;
+    if (rawTags != null) {
+      if (!Array.isArray(rawTags) || rawTags.some((v) => typeof v !== 'string')) {
+        return c.json({ error: 'invalid_tags', message: 'tags 는 문자열 배열이어야 합니다.' }, 400);
+      }
+      tagCodes = [...new Set(rawTags.map((v) => (v as string).trim()).filter(Boolean))];
+      if (tagCodes.length > MAX_TAGS) {
+        return c.json({ error: 'invalid_tags', message: `태그는 최대 ${MAX_TAGS}개까지 가능합니다.` }, 400);
+      }
+      if (tagCodes.length) {
+        const knownCodes = (await query<{ code: string }>(
+          'select code from review_tag_defs where code = any($1::text[])', [tagCodes],
+        )).rows.map((r) => r.code);
+        const unknownCodes = tagCodes.filter((t) => !knownCodes.includes(t));
+        if (unknownCodes.length) {
+          return c.json({
+            error: 'invalid_tags',
+            message: `알 수 없는 태그입니다: ${unknownCodes.join(', ')}. GET /v1/review-tags 로 목록을 확인하세요.`,
+          }, 400);
+        }
+      }
+    }
+
+    // 재방문 의향 — 유저가 직접 고른 값만 저장한다. 안 보내면 null(미응답)이고
+    //  서버가 별점을 보고 추측하지 않는다. 별점과 독립인 축이다(019 주석 참고).
+    let wouldRevisit: boolean | null = null;
+    if (p.wouldRevisit != null) {
+      if (typeof p.wouldRevisit !== 'boolean') {
+        return c.json({ error: 'invalid_wouldRevisit', message: 'wouldRevisit 은 true 또는 false 여야 합니다.' }, 400);
+      }
+      wouldRevisit = p.wouldRevisit;
+    }
+
     // 처음 쓰는 기기라면 닉네임이 반드시 있어야 한다(authors.nickname 은 not null).
     // 이미 아는 기기면 닉네임 생략 가능 — 기존 닉네임을 그대로 재사용한다.
     const known = (await query<{ id: number }>('select id from authors where device_id = $1', [deviceId])).rows[0];
@@ -539,10 +621,18 @@ export function buildApp(): Hono {
 
       // author_nm 은 레거시 표시용 컬럼 — 정규화된 닉네임과 어긋나지 않게 같은 값을 넣는다.
       const inserted = (await client.query<{ id: number }>(
-        `insert into reviews (content_id, location_nm, author_nm, author_id, body, rating, image_urls)
-         values ($1, $2, $3, $4, $5, $6, $7) returning id`,
-        [contentId, locationNm, author.nickname, author.id, bodyText, rating, imageURLs],
+        `insert into reviews (content_id, location_nm, author_nm, author_id, body, rating, image_urls, would_revisit)
+         values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
+        [contentId, locationNm, author.nickname, author.id, bodyText, rating, imageURLs, wouldRevisit],
       )).rows[0]!;
+
+      // 태그는 같은 트랜잭션에서 넣는다 — 후기만 남고 태그가 빠지는 상태를 만들지 않는다.
+      if (tagCodes.length) {
+        await client.query(
+          'insert into review_tags (review_id, tag_code) select $1, unnest($2::text[])',
+          [inserted.id, tagCodes],
+        );
+      }
       return inserted.id;
     });
 

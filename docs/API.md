@@ -192,14 +192,17 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 ### GET /v1/reviews — 리뷰 목록
 | 파라미터 | 예시 | 설명 |
 |---|---|---|
-| `sort` | `latest` | `recommended`(기본, 좋아요+댓글 순) / `latest`(최신순) |
+| `sort` | `likes` | `recommended`(기본, 좋아요+댓글 순) / **`likes`(좋아요만)** / `latest`(최신순) |
 | `contentId` | `2465063` | 특정 장소의 리뷰만. 없으면 전역 목록 |
+| `hasImage` | `true` | 사진이 있는 후기만 — 화면의 "사진/영상 후기만 보기" |
 | `limit`/`offset` | | 페이지네이션 |
+
+> `likes`와 `recommended`를 같은 것으로 취급하지 말 것. 화면의 "좋아요 순"은 `likes`다. `recommended`는 댓글 수까지 더해 정렬하므로 순서가 다르게 나온다.
 
 응답:
 ```json
 {
-  "total": 2, "limit": 20, "offset": 0, "count": 2,
+  "total": 2, "limit": 20, "offset": 0, "sort": "likes", "count": 2,
   "items": [{
     "id": 2,
     "contentId": "2465063",
@@ -207,15 +210,22 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
     "author": "도현",
     "body": "실내 전시라 휠체어로 전 구역 이동이 편했고 …",
     "rating": 5,
+    "wouldRevisit": true,
     "likeCount": 88, "commentCount": 15,
     "isAccessibilityVerified": true,
     "imageURLs": ["https://tong.visitkorea.or.kr/...jpg"],
     "createdAt": "2026-07-11T11:13:12Z",
-    "authorInfo": { "nickname": "도현", "reviewCount": 1, "level": 2 }
+    "authorInfo": { "nickname": "도현", "reviewCount": 1, "level": 2 },
+    "tags": [
+      { "code": "barrier_free", "label": "무장애 친화적이에요", "shortLabel": "무장애", "icon": "access_wheelchair" },
+      { "code": "kids", "label": "아이와 함께하기 좋아요", "shortLabel": "키즈", "icon": "access_child" }
+    ]
   }]
 }
 ```
 - `rating`: 별점 1~5. **`null` 가능** — 별점 이전에 작성된 리뷰(텍스트 전용)
+- `wouldRevisit`: 재방문 의향. **`true`/`false`/`null`(미응답) 세 상태다.** 유저가 직접 고른 값만 들어가며 **별점에서 파생하지 않는다** — 별점이 높아도 멀거나 비싸서 안 갈 수 있고 그 반대도 가능하다
+- `tags`: 후기 뱃지용. 뱃지에는 `shortLabel`("무장애"), 칩·집계에는 `label`("무장애 친화적이에요")을 쓴다. 태그가 없으면 `[]`
 - `author`: 레거시 표시용 닉네임 문자열. iOS가 라이브로 쓰고 있어 유지된다
 - `authorInfo`: 작성자 프로필 — `nickname`, `reviewCount`(해당 작성자의 총 리뷰 수)
   - `level`: **저장하지 않고 `reviewCount`에서 파생.** 임계값 1·3·6·10·20·50·100 (0건=1, 1\~2건=2, 3\~5건=3, 6\~9건=4, 10\~19건=5, 20\~49건=6, 50\~99건=7, 100건+=8)
@@ -230,11 +240,35 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 | `contentId` | `2465063` | **필수.** 없으면 `400 {"error":"missing_contentId"}` |
 
 ```json
-{ "contentId": "2465063", "avgRating": 4.5, "reviewCount": 2, "ratedCount": 2 }
+{
+  "contentId": "2465063", "avgRating": 4.5, "reviewCount": 2, "ratedCount": 2,
+  "tags": [
+    { "code": "barrier_free", "label": "무장애 친화적이에요", "shortLabel": "무장애", "icon": "access_wheelchair", "count": 21 },
+    { "code": "parking", "label": "주차가 편해요", "shortLabel": "주차", "icon": null, "count": 20 }
+  ]
+}
 ```
 - `avgRating`: 평균 별점(소수 1자리). **`rating`이 `null`인 리뷰는 평균에서 제외된다.** 별점이 하나도 없으면 `null`
 - `reviewCount`: 전체 후기 수(별점 없는 것 포함) — 화면의 "후기 N"에 쓴다
 - `ratedCount`: 그중 별점이 있는 수 = `avgRating`의 모집단. `reviewCount`와 다를 수 있다
+- `tags`: 태그 집계 막대용. **인원 많은 순**으로 정렬되며 태그가 없으면 `[]`
+  - ⚠️ 기획의 "20명 이상 언급만 노출" 임계값은 **서버에서 적용하지 않는다.** 개발 단계에서 20명을 채울 수 없어 막대가 전부 사라지기 때문이다. 노출 기준은 클라이언트가 정한다
+
+### GET /v1/review-tags — 후기 태그 카탈로그
+후기 작성 화면의 "어떤 점이 좋았나요?" 칩 목록. 파라미터 없음.
+
+```json
+{
+  "count": 8,
+  "items": [
+    { "code": "barrier_free", "label": "무장애 친화적이에요", "shortLabel": "무장애", "icon": "access_wheelchair" },
+    { "code": "pet", "label": "반려동물과 함께하기 좋아요", "shortLabel": "반려동물", "icon": null }
+  ]
+}
+```
+- **카탈로그가 DB(`review_tag_defs`)에 있어 문구·순서·아이콘을 바꿔도 앱 재배포가 필요 없다.** `sql/019`의 insert가 `on conflict do update`라 마이그레이션 재실행으로 반영된다
+- `icon`: 앱 에셋 이름. **`null`이면 아직 브랜드 아이콘이 없다는 뜻** — 클라이언트는 텍스트만 렌더해야 한다(현재 반려동물·가성비·친절·주차가 `null`)
+- 이 태그는 무장애 28속성과 **성격이 다르다.** 저쪽은 관광공사가 준 사실이고 이쪽은 방문자의 주관 평가다. 화면에서 섞어 표시하지 말 것
 
 ### POST /v1/reviews — 리뷰 작성
 `Content-Type: application/json`. 인증은 다른 `/v1/*`와 동일(Bearer API 키).
@@ -249,6 +283,8 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 | `body` | ✅ | 본문(공백만이면 400, ≤2000자) |
 | `authorNm` | 조건부 | 닉네임(≤40자). 처음 쓰는 기기면 필수, 이미 아는 기기면 생략 시 기존 닉네임 재사용(보내면 갱신) |
 | `contentId` | | 연결할 장소(≤64자). 생략하면 자유 방문지 |
+| `tags` | | 태그 `code` 문자열 배열(최대 8개, 중복은 자동 제거). **카탈로그에 없는 code는 400** — 조용히 버리면 사용자가 고른 태그가 사라진 이유를 알 수 없다 |
+| `wouldRevisit` | | 재방문 의향 `true`/`false`. **생략하면 `null`(미응답)로 저장되고 서버가 별점으로 추측하지 않는다.** boolean 아닌 값은 400 |
 | `imageURLs` | | 사진 URL 문자열 배열. 최대 5장, `http(s)`만. 업로드 자체는 이 API 범위 밖 |
 
 ```bash
@@ -261,9 +297,12 @@ curl -X POST "$BASE/v1/reviews" \
     "body": "엘리베이터가 넓어 휠체어로 층 이동이 편했습니다.",
     "authorNm": "바다",
     "deviceId": "A1B2C3D4-E5F6-4711-8899-AABBCCDDEEFF",
+    "tags": ["barrier_free", "parking"],
+    "wouldRevisit": true,
     "imageURLs": ["https://example.com/photo1.jpg"]
   }'
 ```
+태그는 리뷰와 **같은 트랜잭션**에서 저장된다 — 후기만 남고 태그가 빠지는 상태는 생기지 않는다.
 **201** + 생성된 리뷰 1건(GET 목록 item과 같은 형태, `authorInfo` 포함):
 ```json
 {
