@@ -1,6 +1,6 @@
 // moduwa 관광 데이터 REST API — Hono
 //  조회는 전부 읽기 전용. 예외적으로 리뷰(POST /v1/reviews)만 쓰기를 허용한다.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
@@ -50,7 +50,7 @@ export function buildApp(): Hono {
   const origins = config.api.allowedOrigins;
   app.use('*', cors({
     origin: origins.includes('*') || origins.length === 0 ? '*' : origins,
-    allowMethods: ['GET', 'POST', 'OPTIONS'], // POST 는 리뷰 작성(POST /v1/reviews) 전용
+    allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'], // 쓰기: 후기(POST) · 플랜 저장(PUT)
     allowHeaders: ['authorization', 'x-api-key', 'content-type'],
   }));
 
@@ -77,6 +77,9 @@ export function buildApp(): Hono {
       'GET /v1/reviews/:reviewId/comments?limit=&offset=',
       'POST /v1/reviews/:reviewId/comments  {body, authorNm?, deviceId}',
       'GET /images/reviews/:name  (업로드된 후기 사진 — 인증 불필요)',
+      'GET /v1/plans?deviceId=',
+      'GET /v1/plans/:planId?deviceId=',
+      'PUT /v1/plans/:planId  {deviceId, authorNm?, title, startDate, endDate, region?, party?, coverImageURL?, days[]}',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
   }));
@@ -887,6 +890,263 @@ export function buildApp(): Hono {
     const row = (await query<CommentRow>(`${COMMENT_SELECT} where c.id = $1`, [newId])).rows[0]!;
     return c.json(shapeComment(row), 201);
   });
+
+  // ── 플랜(021) ───────────────────────────────────────────────────────────────
+  //  리뷰와 달리 **개인 데이터**다. 조회도 소유자(deviceId)로 좁히고, 남의 플랜은 보이지 않는다.
+  //  플랜 본문(days/items)은 통째로 교체한다 — 순서 바꾸기·장소 추가·메모가 한 번에 일어나는
+  //  편집이라 부분 갱신 API 를 여러 개 두면 클라이언트가 순서를 맞추다 어긋난다.
+
+  /** deviceId 로 작성자를 찾는다. 없으면 null (플랜이 하나도 없는 기기다). */
+  async function findAuthor(deviceId: string): Promise<number | null> {
+    const row = (await query<{ id: number }>(
+      'select id from authors where device_id = $1', [deviceId],
+    )).rows[0];
+    return row?.id ?? null;
+  }
+
+  /** 요청의 deviceId. 없으면 null 을 돌려주고 호출부가 400 을 낸다. */
+  function deviceIdOf(c: { req: { query: (k: string) => string | undefined } }): string {
+    return (c.req.query('deviceId') ?? '').trim();
+  }
+
+  const PLAN_SELECT = `
+    select p.id, p.title,
+           to_char(p.start_date, 'YYYY-MM-DD') as "startDate",
+           to_char(p.end_date, 'YYYY-MM-DD')   as "endDate",
+           p.region, p.party, p.cover_image_url as "coverImageURL",
+           to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
+           to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
+      from plans p`;
+
+  /** 한 플랜의 days/items 를 한 번에 읽어 중첩 구조로 만든다(N+1 회피). */
+  async function loadDays(planId: string) {
+    const rows = (await query<Record<string, unknown>>(
+      `select d.id as day_id, to_char(d.date, 'YYYY-MM-DD') as day_date, d.position as day_position,
+              i.id as item_id, i.position as item_position, i.kind, i.memo_text,
+              i.content_id, i.place_name, i.category_label, i.category, i.region,
+              i.image_url, i.latitude, i.longitude
+         from plan_days d
+         left join plan_items i on i.day_id = d.id
+        where d.plan_id = $1
+        order by d.position, i.position`, [planId],
+    )).rows;
+
+    const days = new Map<string, { id: string; date: unknown; items: unknown[] }>();
+    for (const r of rows) {
+      const dayId = r.day_id as string;
+      if (!days.has(dayId)) days.set(dayId, { id: dayId, date: r.day_date, items: [] });
+      if (!r.item_id) continue; // 항목이 하나도 없는 날 (left join)
+      days.get(dayId)!.items.push(
+        r.kind === 'memo'
+          ? { id: r.item_id, kind: 'memo', text: r.memo_text }
+          : {
+              id: r.item_id, kind: 'stop',
+              place: {
+                contentID: r.content_id, name: r.place_name,
+                categoryLabel: r.category_label, category: r.category,
+                region: r.region, imageURL: r.image_url,
+                latitude: r.latitude, longitude: r.longitude,
+              },
+            },
+      );
+    }
+    return [...days.values()];
+  }
+
+  // 내 플랜 목록 — 최근 여행부터. 본문(days)은 싣지 않는다(목록 카드에 필요 없다).
+  v1.get('/plans', async (c) => {
+    const deviceId = deviceIdOf(c);
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
+
+    const authorId = await findAuthor(deviceId);
+    if (authorId == null) return c.json({ count: 0, items: [] });
+
+    const rows = (await query(
+      `${PLAN_SELECT} where p.author_id = $1 order by p.start_date desc, p.created_at desc`,
+      [authorId],
+    )).rows;
+    return c.json({ count: rows.length, items: rows });
+  });
+
+  // 플랜 상세 — days/items 포함
+  v1.get('/plans/:planId', async (c) => {
+    const deviceId = deviceIdOf(c);
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
+    const authorId = await findAuthor(deviceId);
+
+    const plan = (await query<Record<string, unknown>>(
+      `${PLAN_SELECT} where p.id = $1 and p.author_id = $2`,
+      [c.req.param('planId'), authorId],
+    )).rows[0];
+    // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 존재 여부가 새어 나갈 이유가 없다.
+    if (!plan) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404);
+
+    return c.json({ ...plan, days: await loadDays(plan.id as string) });
+  });
+
+  const MAX_PLAN_TITLE = 60
+  const MAX_PLAN_DAYS = 60
+  const MAX_ITEMS_PER_DAY = 60
+
+  // 플랜 저장 — 신규 생성과 수정을 하나로 다룬다.
+  //  본문(days/items)은 **통째로 교체**한다. 편집 화면에서 순서 바꾸기·장소 추가·메모가
+  //  한꺼번에 일어나므로, 부분 갱신 API 를 여러 개 두면 클라이언트가 호출 순서를 맞추다
+  //  중간 상태가 저장되는 사고가 난다. 한 트랜잭션에 다 넣으면 그럴 일이 없다.
+  v1.put('/plans/:planId', async (c) => {
+    const planId = c.req.param('planId')
+    if (!/^[0-9a-fA-F-]{36}$/.test(planId)) {
+      return c.json({ error: 'invalid_planId', message: 'planId 는 UUID 여야 합니다.' }, 400)
+    }
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400)
+    }
+    const p = payload as Record<string, unknown>
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+
+    const deviceId = str(p.deviceId)
+    const authorNm = str(p.authorNm)
+    const title = str(p.title)
+    const startDate = str(p.startDate)
+    const endDate = str(p.endDate)
+
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!title) return c.json({ error: 'missing_title', message: '플랜 제목은 비어 있을 수 없습니다.' }, 400)
+    if (title.length > MAX_PLAN_TITLE) {
+      return c.json({ error: 'invalid_title', message: `제목은 ${MAX_PLAN_TITLE}자 이하여야 합니다.` }, 400)
+    }
+    const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)
+    if (!isDate(startDate) || !isDate(endDate)) {
+      return c.json({ error: 'invalid_date', message: 'startDate·endDate 는 YYYY-MM-DD 여야 합니다.' }, 400)
+    }
+    if (endDate < startDate) {
+      return c.json({ error: 'invalid_date', message: '종료일이 시작일보다 앞설 수 없습니다.' }, 400)
+    }
+
+    const rawDays = Array.isArray(p.days) ? p.days : []
+    if (rawDays.length > MAX_PLAN_DAYS) {
+      return c.json({ error: 'too_many_days', message: `하루 수는 ${MAX_PLAN_DAYS}일 이하여야 합니다.` }, 400)
+    }
+    for (const d of rawDays) {
+      const items = (d as Record<string, unknown>)?.items
+      if (Array.isArray(items) && items.length > MAX_ITEMS_PER_DAY) {
+        return c.json({ error: 'too_many_items', message: `하루 항목은 ${MAX_ITEMS_PER_DAY}개 이하여야 합니다.` }, 400)
+      }
+    }
+
+    // 처음 저장하는 기기라면 닉네임이 필요하다(authors.nickname 은 not null).
+    const known = (await query<{ id: number }>('select id from authors where device_id = $1', [deviceId])).rows[0]
+    if (!known && !authorNm) {
+      return c.json({ error: 'missing_authorNm', message: '처음 저장하는 기기입니다. authorNm 을 함께 보내주세요.' }, 400)
+    }
+
+    try {
+      await withTransaction(async (client) => {
+        const author = authorNm
+          ? (await client.query<{ id: number }>(
+              `insert into authors (device_id, nickname) values ($1, $2)
+                 on conflict (device_id) do update set nickname = excluded.nickname
+               returning id`, [deviceId, authorNm],
+            )).rows[0]
+          : (await client.query<{ id: number }>(
+              'select id from authors where device_id = $1', [deviceId],
+            )).rows[0]
+        if (!author) throw new Error('author_upsert_failed')
+
+        // 남의 플랜을 덮어쓰지 못하게 소유자까지 조건에 넣는다. 이미 있는데 주인이 다르면
+        // 아래 upsert 가 0행을 갱신하고, 그 사실을 rowCount 로 잡아 403 을 낸다.
+        const upserted = await client.query(
+          `insert into plans (id, author_id, title, start_date, end_date, region, party, cover_image_url)
+           values ($1, $2, $3, $4, $5, $6, coalesce($7::jsonb, '{}'::jsonb), $8)
+           on conflict (id) do update
+             set title = excluded.title, start_date = excluded.start_date,
+                 end_date = excluded.end_date, region = excluded.region,
+                 party = excluded.party, cover_image_url = excluded.cover_image_url,
+                 updated_at = now()
+           where plans.author_id = $2`,
+          [planId, author.id, title, startDate, endDate,
+           str(p.region) || null, JSON.stringify(p.party ?? {}), str(p.coverImageURL) || null],
+        )
+        if (upserted.rowCount === 0) throw new Error('forbidden')
+
+        // days/items 통째 교체. cascade 로 items 까지 함께 지워진다.
+        await client.query('delete from plan_days where plan_id = $1', [planId])
+
+        for (const [dayIndex, rawDay] of rawDays.entries()) {
+          const d = rawDay as Record<string, unknown>
+          const dayId = str(d.id) || randomUUID()
+          const date = str(d.date)
+          if (!isDate(date)) throw new Error('invalid_day_date')
+
+          await client.query(
+            'insert into plan_days (id, plan_id, date, position) values ($1, $2, $3, $4)',
+            [dayId, planId, date, dayIndex],
+          )
+
+          const items = Array.isArray(d.items) ? d.items : []
+          for (const [itemIndex, rawItem] of items.entries()) {
+            const it = rawItem as Record<string, unknown>
+            const kind = str(it.kind)
+            const itemId = str(it.id) || randomUUID()
+
+            if (kind === 'memo') {
+              const text = str(it.text)
+              if (!text) throw new Error('empty_memo')
+              await client.query(
+                `insert into plan_items (id, day_id, position, kind, memo_text)
+                 values ($1, $2, $3, 'memo', $4)`,
+                [itemId, dayId, itemIndex, text],
+              )
+            } else if (kind === 'stop') {
+              const place = (it.place ?? {}) as Record<string, unknown>
+              const name = str(place.name)
+              if (!name) throw new Error('empty_place_name')
+              await client.query(
+                `insert into plan_items
+                   (id, day_id, position, kind, content_id, place_name, category_label,
+                    category, region, image_url, latitude, longitude)
+                 values ($1, $2, $3, 'stop', $4, $5, $6, $7, $8, $9, $10, $11)`,
+                [itemId, dayId, itemIndex, str(place.contentID) || null, name,
+                 str(place.categoryLabel) || '장소', str(place.category) || null,
+                 str(place.region) || null, str(place.imageURL) || null,
+                 typeof place.latitude === 'number' ? place.latitude : null,
+                 typeof place.longitude === 'number' ? place.longitude : null],
+              )
+            } else {
+              throw new Error('invalid_kind')
+            }
+          }
+        }
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : ''
+      if (reason === 'forbidden') {
+        return c.json({ error: 'forbidden', message: '다른 기기의 플랜은 저장할 수 없습니다.' }, 403)
+      }
+      if (reason === 'invalid_day_date') {
+        return c.json({ error: 'invalid_date', message: 'days[].date 는 YYYY-MM-DD 여야 합니다.' }, 400)
+      }
+      if (reason === 'empty_memo') {
+        return c.json({ error: 'invalid_item', message: '메모 내용은 비어 있을 수 없습니다.' }, 400)
+      }
+      if (reason === 'empty_place_name') {
+        return c.json({ error: 'invalid_item', message: '장소 이름은 비어 있을 수 없습니다.' }, 400)
+      }
+      if (reason === 'invalid_kind') {
+        return c.json({ error: 'invalid_item', message: "kind 는 'stop' 또는 'memo' 여야 합니다." }, 400)
+      }
+      throw error
+    }
+
+    const saved = (await query<Record<string, unknown>>(`${PLAN_SELECT} where p.id = $1`, [planId])).rows[0]!
+    return c.json({ ...saved, days: await loadDays(planId) })
+  })
 
   app.route('/v1', v1);
 

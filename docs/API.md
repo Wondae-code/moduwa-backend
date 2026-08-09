@@ -389,6 +389,50 @@ curl -X POST "$BASE/v1/reviews/images" \
 > ⚠️ **운영 주의.** 쓰기 API가 있으므로 `reviews`·`authors`의 소스는 관리형(prod) DB다.
 > `scripts/push-data.sh`의 파괴적 동기화 대상에서 두 테이블은 제외되어 있다 — 되돌리면 유저 리뷰가 소실된다.
 
+## 플랜 (여행 일정)
+
+앱의 플랜 탭 데이터. **개인 데이터**라 리뷰와 달리 조회도 소유자로 좁힌다 — 소유자 식별은 리뷰와 같은 기기 UUID + 닉네임(`authors`) 방식이다.
+
+### GET /v1/plans?deviceId= — 내 플랜 목록
+최근 여행부터. **본문(`days`)은 싣지 않는다** — 목록 카드에 필요 없다.
+```json
+{ "count": 1, "items": [{
+  "id": "…", "title": "경주 2박",
+  "startDate": "2026-09-01", "endDate": "2026-09-02",
+  "region": "gyeongju", "party": { "ageGroups": ["twenties"] },
+  "coverImageURL": null, "createdAt": "…", "updatedAt": "…" }] }
+```
+
+### GET /v1/plans/:planId?deviceId= — 플랜 상세
+위 필드 + `days[]`. 없는 플랜과 **남의 플랜을 구분해 주지 않는다**(둘 다 404) — 존재 여부가 새어 나갈 이유가 없다.
+```json
+{ "…": "목록과 동일", "days": [{
+  "id": "…", "date": "2026-09-01",
+  "items": [
+    { "id": "…", "kind": "stop", "place": { "contentID": "126508", "name": "황리단길",
+      "categoryLabel": "관광명소", "category": null, "region": "경주시내",
+      "imageURL": null, "latitude": 35.83, "longitude": 129.21 } },
+    { "id": "…", "kind": "memo", "text": "점심은 여기서" }
+  ] }] }
+```
+
+### PUT /v1/plans/:planId — 플랜 저장 (생성 + 수정)
+`planId`는 **클라이언트가 만든 UUID**다. 생성과 수정이 같은 요청이라 앱이 "새 플랜인지" 따질 필요가 없다.
+
+| 필드 | 필수 | 설명 |
+|---|---|---|
+| `deviceId` | ✅ | 소유자 식별. 응답에 포함되지 않는다 |
+| `title` | ✅ | ≤60자 |
+| `startDate`/`endDate` | ✅ | `YYYY-MM-DD`. 종료일이 앞서면 400 |
+| `authorNm` | 조건부 | 처음 저장하는 기기면 필수 |
+| `region`/`party`/`coverImageURL` | | `party`는 앱이 해석하는 jsonb |
+| `days[]` | | `{id?, date, items[]}` · item은 `{id?, kind:'stop'\|'memo', place?, text?}` |
+
+- **본문(days/items)은 통째로 교체된다.** 편집 화면에서 순서 바꾸기·장소 추가·메모가 한꺼번에 일어나므로, 부분 갱신 API를 여러 개 두면 클라이언트가 호출 순서를 맞추다 중간 상태가 저장된다. 한 트랜잭션에 다 넣으면 그럴 일이 없다
+- 남의 플랜을 덮어쓰려 하면 **403**. 검증 실패 시 트랜잭션이 통째로 롤백돼 기존 데이터가 남는다
+- 하루 수 60일 · 하루 항목 60개 상한
+- **이동 거리는 저장하지 않는다.** 좌표만 있으면 계산할 수 있고, 저장하면 순서를 바꿀 때마다 갱신해야 하는데 그 갱신을 반드시 어딘가에서 빠뜨린다
+
 ## 예제
 ```bash
 KEY=mdw_xxx
