@@ -50,7 +50,7 @@ export function buildApp(): Hono {
   const origins = config.api.allowedOrigins;
   app.use('*', cors({
     origin: origins.includes('*') || origins.length === 0 ? '*' : origins,
-    allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'], // 쓰기: 후기(POST) · 플랜 저장(PUT)
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // 쓰기: 후기(POST) · 플랜(PUT/DELETE)
     allowHeaders: ['authorization', 'x-api-key', 'content-type'],
   }));
 
@@ -80,7 +80,8 @@ export function buildApp(): Hono {
       'GET /v1/plan-options',
       'GET /v1/plans?deviceId=',
       'GET /v1/plans/:planId?deviceId=',
-      'PUT /v1/plans/:planId  {deviceId, authorNm?, title, startDate, endDate, region?, party?, coverImageURL?, days[]}',
+      'PUT /v1/plans/:planId  {deviceId, authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
+      'DELETE /v1/plans/:planId?deviceId=',
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
   }));
@@ -1207,6 +1208,27 @@ export function buildApp(): Hono {
 
     const saved = (await query<Record<string, unknown>>(`${PLAN_SELECT} where p.id = $1`, [planId])).rows[0]!
     return c.json({ ...saved, days: await loadDays(planId) })
+  })
+
+  // 플랜 삭제 — 목록 카드의 ⋮ 메뉴가 쓸 자리다.
+  //  days/items 는 cascade 로 함께 지워진다(021 의 on delete cascade).
+  //  ⚠️ 되돌릴 수 없다. 휴지통을 두지 않는 이유는 플랜이 사용자가 직접 만든 소수의 데이터라
+  //     실수로 지웠을 때 다시 만드는 비용이 크지 않고, 소프트 삭제를 도입하면 목록·상세 조회에
+  //     전부 조건이 붙어 실수할 여지가 늘기 때문이다.
+  v1.delete('/plans/:planId', async (c) => {
+    const deviceId = deviceIdOf(c)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+
+    const authorId = await findAuthor(deviceId)
+    // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 조회와 같은 규칙이다.
+    if (authorId == null) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+
+    const result = await query(
+      'delete from plans where id = $1 and author_id = $2',
+      [c.req.param('planId'), authorId],
+    )
+    if (result.rowCount === 0) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+    return c.body(null, 204)
   })
 
   app.route('/v1', v1);
