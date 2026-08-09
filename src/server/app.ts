@@ -77,6 +77,7 @@ export function buildApp(): Hono {
       'GET /v1/reviews/:reviewId/comments?limit=&offset=',
       'POST /v1/reviews/:reviewId/comments  {body, authorNm?, deviceId}',
       'GET /images/reviews/:name  (업로드된 후기 사진 — 인증 불필요)',
+      'GET /v1/plan-options',
       'GET /v1/plans?deviceId=',
       'GET /v1/plans/:planId?deviceId=',
       'PUT /v1/plans/:planId  {deviceId, authorNm?, title, startDate, endDate, region?, party?, coverImageURL?, days[]}',
@@ -914,6 +915,7 @@ export function buildApp(): Hono {
            to_char(p.start_date, 'YYYY-MM-DD') as "startDate",
            to_char(p.end_date, 'YYYY-MM-DD')   as "endDate",
            p.region, p.party, p.cover_image_url as "coverImageURL",
+           p.themes, p.budget, p.day_trip_only as "dayTripOnly",
            to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
       from plans p`;
@@ -984,6 +986,33 @@ export function buildApp(): Hono {
     return c.json({ ...plan, days: await loadDays(plan.id as string) });
   });
 
+  // 새 플랜 플로우 4/6·5/6 의 선택지. 표시 문구를 앱에 하드코딩하지 않고 여기서 내려보낸다 —
+  //  문구가 바뀔 때 앱 재배포 대신 서버 배포로 끝난다(후기 태그 카탈로그와 같은 이유).
+  const PLAN_THEMES = [
+    { code: 'camping', label: '차박·캠핑' },
+    { code: 'waterpark', label: '워터파크' },
+    { code: 'photo', label: 'SNS 사진' },
+    { code: 'nature', label: '자연과 함께' },
+    { code: 'indoor', label: '실내' },
+    { code: 'heritage', label: '전통과 역사' },
+    { code: 'scenery', label: '아름다운 풍경' },
+    { code: 'shopping', label: '쇼핑하기' },
+    { code: 'culture', label: '문화·예술' },
+    { code: 'art', label: '미술' },
+    { code: 'food', label: '먹방 투어' },
+    { code: 'nightview', label: '야경이 예쁜 곳' },
+  ] as const
+  const PLAN_BUDGETS = [
+    { code: 'low', label: '저예산', hint: '아끼고 싶어요' },
+    { code: 'medium', label: '중예산', hint: '부담스럽지 않게 쓰고 싶어요' },
+    { code: 'high', label: '고예산', hint: '여유 있게 즐길래요' },
+  ] as const
+  const THEME_CODES = new Set<string>(PLAN_THEMES.map((t) => t.code))
+  const BUDGET_CODES = new Set<string>(PLAN_BUDGETS.map((b) => b.code))
+
+  // 새 플랜 플로우가 그릴 선택지 목록. 인증만 필요하고 사용자별 값이 아니다.
+  v1.get('/plan-options', (c) => c.json({ themes: PLAN_THEMES, budgets: PLAN_BUDGETS }))
+
   const MAX_PLAN_TITLE = 60
   const MAX_PLAN_DAYS = 60
   const MAX_ITEMS_PER_DAY = 60
@@ -1029,6 +1058,34 @@ export function buildApp(): Hono {
       return c.json({ error: 'invalid_date', message: '종료일이 시작일보다 앞설 수 없습니다.' }, 400)
     }
 
+    // 테마 — 화이트리스트 밖 코드는 조용히 버리지 않고 400 으로 알린다.
+    //  사용자가 고른 것이 사라진 이유를 알 수 없는 편이 더 나쁘다(후기 태그와 같은 규칙).
+    let themes: string[] = []
+    if (p.themes != null) {
+      if (!Array.isArray(p.themes) || p.themes.some((v) => typeof v !== 'string')) {
+        return c.json({ error: 'invalid_themes', message: 'themes 는 문자열 배열이어야 합니다.' }, 400)
+      }
+      themes = [...new Set((p.themes as string[]).map((v) => v.trim()).filter(Boolean))]
+      const unknown = themes.filter((v) => !THEME_CODES.has(v))
+      if (unknown.length) {
+        return c.json({
+          error: 'invalid_themes',
+          message: `알 수 없는 테마입니다: ${unknown.join(', ')}. GET /v1/plan-options 로 목록을 확인하세요.`,
+        }, 400)
+      }
+    }
+
+    // 예산 — 건너뛰면 null 이다. "고르지 않음"과 "저예산"은 다른 값이라 기본값을 넣지 않는다.
+    const budget = str(p.budget) || null
+    if (budget && !BUDGET_CODES.has(budget)) {
+      return c.json({
+        error: 'invalid_budget',
+        message: `budget 은 ${[...BUDGET_CODES].join('/')} 중 하나여야 합니다.`,
+      }, 400)
+    }
+
+    const dayTripOnly = p.dayTripOnly === true
+
     const rawDays = Array.isArray(p.days) ? p.days : []
     if (rawDays.length > MAX_PLAN_DAYS) {
       return c.json({ error: 'too_many_days', message: `하루 수는 ${MAX_PLAN_DAYS}일 이하여야 합니다.` }, 400)
@@ -1062,16 +1119,20 @@ export function buildApp(): Hono {
         // 남의 플랜을 덮어쓰지 못하게 소유자까지 조건에 넣는다. 이미 있는데 주인이 다르면
         // 아래 upsert 가 0행을 갱신하고, 그 사실을 rowCount 로 잡아 403 을 낸다.
         const upserted = await client.query(
-          `insert into plans (id, author_id, title, start_date, end_date, region, party, cover_image_url)
-           values ($1, $2, $3, $4, $5, $6, coalesce($7::jsonb, '{}'::jsonb), $8)
+          `insert into plans (id, author_id, title, start_date, end_date, region, party,
+                              cover_image_url, themes, budget, day_trip_only)
+           values ($1, $2, $3, $4, $5, $6, coalesce($7::jsonb, '{}'::jsonb), $8, $9, $10, $11)
            on conflict (id) do update
              set title = excluded.title, start_date = excluded.start_date,
                  end_date = excluded.end_date, region = excluded.region,
                  party = excluded.party, cover_image_url = excluded.cover_image_url,
+                 themes = excluded.themes, budget = excluded.budget,
+                 day_trip_only = excluded.day_trip_only,
                  updated_at = now()
            where plans.author_id = $2`,
           [planId, author.id, title, startDate, endDate,
-           str(p.region) || null, JSON.stringify(p.party ?? {}), str(p.coverImageURL) || null],
+           str(p.region) || null, JSON.stringify(p.party ?? {}), str(p.coverImageURL) || null,
+           themes, budget, dayTripOnly],
         )
         if (upserted.rowCount === 0) throw new Error('forbidden')
 

@@ -393,6 +393,14 @@ curl -X POST "$BASE/v1/reviews/images" \
 
 앱의 플랜 탭 데이터. **개인 데이터**라 리뷰와 달리 조회도 소유자로 좁힌다 — 소유자 식별은 리뷰와 같은 기기 UUID + 닉네임(`authors`) 방식이다.
 
+### GET /v1/plan-options — 새 플랜 플로우 선택지
+4/6(테마)·5/6(예산) 화면이 그릴 목록. 사용자별 값이 아니다.
+```json
+{ "themes": [{ "code": "heritage", "label": "전통과 역사" }, …12개],
+  "budgets": [{ "code": "low", "label": "저예산", "hint": "아끼고 싶어요" }, …3개] }
+```
+표시 문구를 앱에 하드코딩하지 않고 서버가 내려보낸다 — 문구가 바뀔 때 앱 재배포 대신 서버 배포로 끝난다.
+
 ### GET /v1/plans?deviceId= — 내 플랜 목록
 최근 여행부터. **본문(`days`)은 싣지 않는다** — 목록 카드에 필요 없다.
 ```json
@@ -426,6 +434,9 @@ curl -X POST "$BASE/v1/reviews/images" \
 | `startDate`/`endDate` | ✅ | `YYYY-MM-DD`. 종료일이 앞서면 400 |
 | `authorNm` | 조건부 | 처음 저장하는 기기면 필수 |
 | `region`/`party`/`coverImageURL` | | `party`는 앱이 해석하는 jsonb |
+| `themes` | | 테마 `code` 배열. 목록 밖 코드는 **400** — 고른 것이 조용히 사라지지 않게 |
+| `budget` | | `low`/`medium`/`high`. **생략하면 `null`(고르지 않음)** — 기본값을 넣지 않는다 |
+| `dayTripOnly` | | 4/6 하단 "당일치기만 즐길게요". 날짜로 유추하지 않는다 — 하루짜리 일정과 당일치기 선호는 다른 값이다 |
 | `days[]` | | `{id?, date, items[]}` · item은 `{id?, kind:'stop'\|'memo', place?, text?}` |
 
 - **본문(days/items)은 통째로 교체된다.** 편집 화면에서 순서 바꾸기·장소 추가·메모가 한꺼번에 일어나므로, 부분 갱신 API를 여러 개 두면 클라이언트가 호출 순서를 맞추다 중간 상태가 저장된다. 한 트랜잭션에 다 넣으면 그럴 일이 없다
