@@ -108,6 +108,24 @@ TARGET_DATABASE_URL="<관리형 공개 URL>" bash scripts/push-data.sh
 
 배포 URL: `https://moduwa-backend-production.up.railway.app`
 
+## 수집 현황 대시보드 (`/dashboard`)
+데이터가 실제로 어떻게 쌓이는지 보고, 임의 조회까지 할 수 있는 운영 화면. **비밀번호 로그인**(폼 + HMAC 서명 쿠키, 세션 12시간)으로 보호되며 `DASHBOARD_PASSWORD` 가 비어 있으면 **라우트 자체가 열리지 않는다**.
+
+```bash
+# .env 에 DASHBOARD_PASSWORD 설정 후
+npm run api   # → http://localhost:8080/dashboard
+```
+
+`DATABASE_URL` 이 가리키는 DB 를 그대로 보여준다 — 로컬에서 띄우면 수집 원본 전체(3.5M행 `tar_rlte_records` 포함), 배포본에서는 관리형 슬림 DB.
+
+| 탭 | 내용 |
+|---|---|
+| 개요 | 총 적재 행수 · **오늘 신규(순증)** · **오늘 수집(갱신 포함)** 을 총량 대비 %로 · 최근 7일 신규<br>수집 진행률(상세 커버리지 = 완료/대상) · 테이블별 적재 현황 · 작업큐 · 실행 로그 |
+| 테이블 | 테이블 선택 → 페이지 단위 브라우징 |
+| SQL | 읽기 전용 콘솔 — `select`/`with` 단문만, READ ONLY 트랜잭션 + 8초 타임아웃 + 500행 상한 |
+
+오늘/7일 수치는 스냅샷 테이블 없이 각 테이블의 `created_at`(순증)·`updated_at`(오늘 API에서 받아 upsert한 양)에서 바로 계산한다.
+
 ## 배포 (Railway)
 GitHub 연동 → Postgres + Dockerfile 서비스 → 환경변수(`DATABASE_URL`,`API_KEYS`,…) → 슬림 데이터 push. → **[docs/DEPLOY.md](docs/DEPLOY.md)**
 

@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { query, withTransaction } from '../db';
+import { buildDashboard } from './dashboard';
 import { apiKeyAuth, rateLimit } from './middleware';
 
 // ── 후기 사진 저장 ────────────────────────────────────────────────────────────
@@ -82,6 +83,7 @@ export function buildApp(): Hono {
       'GET /v1/plans/:planId?deviceId=',
       'PUT /v1/plans/:planId  {deviceId, authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
       'DELETE /v1/plans/:planId?deviceId=',
+      ...(config.dashboard.password ? ['GET /dashboard  (수집 현황 대시보드 — 비밀번호 로그인)'] : []),
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
   }));
@@ -1245,6 +1247,11 @@ export function buildApp(): Hono {
   })
 
   app.route('/v1', v1);
+
+  // 수집 현황 대시보드 — 비밀번호가 설정된 경우에만 라우트를 연다.
+  //  DASHBOARD_PASSWORD 를 깜빡한 채 배포했을 때 "인증 없는 대시보드"가 노출되는 것보다
+  //  404 가 낫다. 활성화 여부는 기동 로그에 찍는다.
+  if (config.dashboard.password) app.route('/dashboard', buildDashboard());
 
   app.notFound((c) => c.json({ error: 'not_found' }, 404));
   app.onError((err, c) => {

@@ -30,6 +30,7 @@ node scripts/gen-api-key.mjs 3      # 개발자 수만큼
    API_KEYS       = mdw_xxx,mdw_yyy              # 0)에서 생성
    ALLOWED_ORIGINS= *                            # 브라우저 직접호출 시 도메인 지정
    RATE_LIMIT_PER_MIN = 120
+   DASHBOARD_PASSWORD = <강한 비밀번호>            # /dashboard 접근용. 비우면 대시보드 미노출
    ```
    (수집도 Railway에서 돌릴 거면 `DATA_GO_KR_SERVICE_KEY`, `KAKAO_REST_API_KEY` 도 추가)
 4. API 서비스에 **Public Domain** 생성(Settings → Networking → Generate Domain)
@@ -73,3 +74,6 @@ curl -H "Authorization: Bearer mdw_xxx" \
 - [ ] 관리형 Postgres는 공개 인터넷에 직접 노출 금지(내부 URL 사용, 필요 시 IP 허용목록)
 - [ ] HTTPS 도메인으로만 배포(Railway/Render 기본 제공)
 - [ ] 키 유출 시: `API_KEYS` 에서 제거 후 재배포 → 즉시 무효화
+- [ ] `DASHBOARD_PASSWORD` 는 추측 불가능한 값 — 이 화면은 DB 전체를 읽을 수 있다(SQL 콘솔 포함)
+- [ ] 대시보드가 필요 없는 환경이면 `DASHBOARD_PASSWORD` 를 비워 둔다 → 라우트가 등록되지 않아 404
+- [ ] 대시보드 비밀번호 교체 = 발급된 세션 전부 즉시 무효(서명 키가 비밀번호에서 파생)

@@ -71,6 +71,20 @@ export const config = {
     // 요청 전체 상한(5장 × 2MB).
     maxUploadBytes: num('MAX_UPLOAD_BYTES', 10 * 1024 * 1024),
   },
+
+  // ── 수집 현황 대시보드(/dashboard) ──
+  //  비밀번호가 비어 있으면 라우트 자체를 등록하지 않는다 — 환경변수를 깜빡한 채 배포해도
+  //  "인증 없이 열린 대시보드"가 생기지 않게 하는 게 안전한 기본값이다.
+  dashboard: {
+    password: process.env.DASHBOARD_PASSWORD?.trim() ?? '',
+    // 세션 쿠키 서명 키. 비우면 비밀번호에서 파생한다(= 비밀번호를 바꾸면 기존 세션 자동 무효).
+    sessionSecret: process.env.DASHBOARD_SESSION_SECRET?.trim() ?? '',
+    sessionHours: num('DASHBOARD_SESSION_HOURS', 12),
+    // 집계·조회 1건당 상한. 3.8GB짜리 tar_rlte_records 같은 테이블이 페이지 전체를
+    // 붙잡지 않도록 타임아웃을 걸고, 넘으면 그 칸만 '측정 생략'으로 표시한다.
+    queryTimeoutMs: num('DASHBOARD_QUERY_TIMEOUT_MS', 8000),
+    queryRowLimit: num('DASHBOARD_QUERY_ROW_LIMIT', 500),
+  },
 };
 
 /** 'YYYYMM' 범위를 배열로 (최신월 우선 정렬은 호출부에서). */
