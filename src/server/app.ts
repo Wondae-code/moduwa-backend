@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { query, withTransaction } from '../db';
@@ -932,6 +933,7 @@ export function buildApp(): Hono {
            to_char(p.end_date, 'YYYY-MM-DD')   as "endDate",
            p.region, p.party, p.cover_image_url as "coverImageURL",
            p.themes, p.budget, p.day_trip_only as "dayTripOnly",
+           to_char(p.confirmed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "confirmedAt",
            to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
       from plans p`;
@@ -1298,6 +1300,62 @@ export function buildApp(): Hono {
     if (result.rowCount === 0) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
     return c.body(null, 204)
   })
+
+  /**
+   * 플랜을 일정으로 확정한다 / 초안으로 되돌린다 — 시안 플랜 카드 ⋮ 의 "일정에 추가"(553:135).
+   *
+   * PUT 으로 하지 않는 이유가 분명하다: `PUT /v1/plans/:id` 는 본문을 **통째로 교체**하므로
+   * 확정 하나 바꾸자고 부르려면 온전한 플랜(days 포함)을 먼저 받아 와야 하고, 목록에서 온 플랜을
+   * 실수로 넘기면 서버의 일정이 지워진다. 상태 한 칸만 바꾸는 길을 따로 낸다.
+   *
+   * 되돌리기(DELETE)를 함께 두는 이유: 확정이 한 방향뿐이면 잘못 누른 플랜이 플랜 탭에서
+   * 영영 사라진다. 시안에 되돌리는 버튼은 없지만 길 자체를 막아 둘 이유가 없다.
+   */
+  type ConfirmResult =
+    | { ok: true; plan: Record<string, unknown> }
+    | { ok: false; error: 'missing_deviceId' | 'not_found' }
+
+  const applyConfirm = async (
+    deviceId: string, planId: string, confirmed: boolean,
+  ): Promise<ConfirmResult> => {
+    if (!deviceId) return { ok: false, error: 'missing_deviceId' }
+
+    const authorId = await findAuthor(deviceId)
+    // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 조회·삭제와 같은 규칙이다.
+    if (authorId == null) return { ok: false, error: 'not_found' }
+
+    // 이미 같은 상태여도 성공으로 둔다 — 두 번 눌렀다고 실패를 보여 줄 이유가 없다.
+    //  coalesce 로 처음 확정한 시각을 지킨다(다시 눌러도 시각이 밀리지 않는다).
+    const result = await query(
+      `update plans set confirmed_at = ${confirmed ? 'coalesce(confirmed_at, now())' : 'null'},
+                        updated_at = now()
+        where id = $1 and author_id = $2`,
+      [planId, authorId],
+    )
+    if (result.rowCount === 0) return { ok: false, error: 'not_found' }
+
+    const plan = (await query<Record<string, unknown>>(
+      `${PLAN_SELECT} where p.id = $1 and p.author_id = $2`, [planId, authorId],
+    )).rows[0]!
+    return { ok: true, plan: { ...plan, days: await loadDays(plan.id as string) } }
+  }
+
+  const confirmMessages = {
+    missing_deviceId: 'deviceId 는 필수입니다.',
+    not_found: '플랜을 찾을 수 없습니다.',
+  } as const
+
+  const respondConfirm = async (c: Context, confirmed: boolean) => {
+    const r = await applyConfirm(deviceIdOf(c), c.req.param('planId') ?? '', confirmed)
+    if (r.ok) return c.json(r.plan)
+    return c.json(
+      { error: r.error, message: confirmMessages[r.error] },
+      r.error === 'missing_deviceId' ? 400 : 404,
+    )
+  }
+
+  v1.post('/plans/:planId/confirm', (c) => respondConfirm(c, true))
+  v1.delete('/plans/:planId/confirm', (c) => respondConfirm(c, false))
 
   app.route('/v1', v1);
 
