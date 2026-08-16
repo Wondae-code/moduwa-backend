@@ -8,6 +8,7 @@ import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { query, withTransaction } from '../db';
+import { bindDevice, findAuthorByDevice } from './accounts';
 import { buildDashboard } from './dashboard';
 import { apiKeyAuth, rateLimit } from './middleware';
 
@@ -754,24 +755,27 @@ export function buildApp(): Hono {
 
     // 처음 쓰는 기기라면 닉네임이 반드시 있어야 한다(authors.nickname 은 not null).
     // 이미 아는 기기면 닉네임 생략 가능 — 기존 닉네임을 그대로 재사용한다.
-    const known = (await query<{ id: number }>('select id from authors where device_id = $1', [deviceId])).rows[0];
-    if (!known && !authorNm) {
+    const knownId = await findAuthor(deviceId);
+    if (knownId == null && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
     }
 
     const newId = await withTransaction(async (client) => {
-      // 작성자 upsert — device_id 가 키. 닉네임을 보냈으면 갱신, 생략하면 기존 값 유지.
-      const author = authorNm
+      // 작성자 확보. 이미 이 기기에 묶인 계정이 있으면 그것을 쓰고(로그인 계정일 수도 있다),
+      // 없을 때만 새 익명 계정을 만든다. 닉네임을 보냈으면 갱신, 생략하면 기존 값 유지.
+      const author = knownId != null
         ? (await client.query<{ id: number; nickname: string }>(
+            `update authors set nickname = coalesce(nullif($2, ''), nickname)
+              where id = $1 returning id, nickname`, [knownId, authorNm],
+          )).rows[0]
+        : (await client.query<{ id: number; nickname: string }>(
             `insert into authors (device_id, nickname) values ($1, $2)
                on conflict (device_id) do update set nickname = excluded.nickname
              returning id, nickname`, [deviceId, authorNm],
-          )).rows[0]
-        : (await client.query<{ id: number; nickname: string }>(
-            'select id, nickname from authors where device_id = $1', [deviceId],
           )).rows[0];
       // 위 사전 확인을 통과했으므로 정상 경로에서는 항상 존재한다(동시 삭제 시에만 없음).
       if (!author) throw new Error('author_upsert_failed');
+      await bindDevice(client, deviceId, author.id);
 
       // author_nm 은 레거시 표시용 컬럼 — 정규화된 닉네임과 어긋나지 않게 같은 값을 넣는다.
       const inserted = (await client.query<{ id: number }>(
@@ -877,22 +881,24 @@ export function buildApp(): Hono {
     if (!review) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
 
     // 리뷰 작성과 같은 규칙 — 처음 쓰는 기기는 닉네임이 필수다.
-    const known = (await query<{ id: number }>('select id from authors where device_id = $1', [deviceId])).rows[0];
-    if (!known && !authorNm) {
+    const knownId = await findAuthor(deviceId);
+    if (knownId == null && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
     }
 
     const newId = await withTransaction(async (client) => {
-      const author = authorNm
+      const author = knownId != null
         ? (await client.query<{ id: number }>(
+            `update authors set nickname = coalesce(nullif($2, ''), nickname)
+              where id = $1 returning id`, [knownId, authorNm],
+          )).rows[0]
+        : (await client.query<{ id: number }>(
             `insert into authors (device_id, nickname) values ($1, $2)
                on conflict (device_id) do update set nickname = excluded.nickname
              returning id`, [deviceId, authorNm],
-          )).rows[0]
-        : (await client.query<{ id: number }>(
-            'select id from authors where device_id = $1', [deviceId],
           )).rows[0];
       if (!author) throw new Error('author_upsert_failed');
+      await bindDevice(client, deviceId, author.id);
 
       const inserted = (await client.query<{ id: number }>(
         'insert into review_comments (review_id, author_id, body) values ($1, $2, $3) returning id',
@@ -915,12 +921,10 @@ export function buildApp(): Hono {
   //  편집이라 부분 갱신 API 를 여러 개 두면 클라이언트가 순서를 맞추다 어긋난다.
 
   /** deviceId 로 작성자를 찾는다. 없으면 null (플랜이 하나도 없는 기기다). */
-  async function findAuthor(deviceId: string): Promise<number | null> {
-    const row = (await query<{ id: number }>(
-      'select id from authors where device_id = $1', [deviceId],
-    )).rows[0];
-    return row?.id ?? null;
-  }
+  //  024 이후 정본은 author_devices 다 — 로그아웃하면 그 바인딩이 끊기고, 같은 기기의
+  //  다음 활동은 새 빈 계정을 받는다. authors.device_id 직접 조회로 돌아가면 끊은 바인딩이
+  //  되살아나 로그아웃한 기기에 계정 데이터가 다시 보인다.
+  const findAuthor = findAuthorByDevice;
 
   /** 요청의 deviceId. 없으면 null 을 돌려주고 호출부가 400 을 낸다. */
   function deviceIdOf(c: { req: { query: (k: string) => string | undefined } }): string {
@@ -1169,23 +1173,25 @@ export function buildApp(): Hono {
     }
 
     // 처음 저장하는 기기라면 닉네임이 필요하다(authors.nickname 은 not null).
-    const known = (await query<{ id: number }>('select id from authors where device_id = $1', [deviceId])).rows[0]
-    if (!known && !authorNm) {
+    const knownId = await findAuthor(deviceId)
+    if (knownId == null && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 저장하는 기기입니다. authorNm 을 함께 보내주세요.' }, 400)
     }
 
     try {
       await withTransaction(async (client) => {
-        const author = authorNm
+        const author = knownId != null
           ? (await client.query<{ id: number }>(
+              `update authors set nickname = coalesce(nullif($2, ''), nickname)
+                where id = $1 returning id`, [knownId, authorNm],
+            )).rows[0]
+          : (await client.query<{ id: number }>(
               `insert into authors (device_id, nickname) values ($1, $2)
                  on conflict (device_id) do update set nickname = excluded.nickname
                returning id`, [deviceId, authorNm],
             )).rows[0]
-          : (await client.query<{ id: number }>(
-              'select id from authors where device_id = $1', [deviceId],
-            )).rows[0]
         if (!author) throw new Error('author_upsert_failed')
+        await bindDevice(client, deviceId, author.id)
 
         // 남의 플랜을 덮어쓰지 못하게 소유자까지 조건에 넣는다. 이미 있는데 주인이 다르면
         // 아래 upsert 가 0행을 갱신하고, 그 사실을 rowCount 로 잡아 403 을 낸다.
