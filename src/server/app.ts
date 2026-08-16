@@ -404,12 +404,16 @@ export function buildApp(): Hono {
     const total = (await query<{ n: number }>(
       `select count(*)::int n from barrier_free ${wsql}`, [pattern],
     )).rows[0]!.n;
+    // mapx/mapy 를 함께 내보낸다 — 목록(`BF_COLS`)·상세는 이미 주는데 검색만 자기 select 를
+    //  따로 써서 빠져 있었다. 이게 없으면 검색으로 담은 장소는 좌표가 없어 플랜 지도에 핀이
+    //  안 찍히고 구간 거리도 못 낸다(클라이언트가 상세를 한 번 더 부르는 수밖에 없었다).
     const rows = (await query<{
       contentid: string; title: string | null; contenttypeid: string | null;
       addr1: string | null; firstimage: string | null;
+      mapx: number | null; mapy: number | null;
       access_wheelchair: boolean; access_visual: boolean; access_hearing: boolean; access_infant: boolean;
     }>(
-      `select contentid, title, contenttypeid, addr1, firstimage,
+      `select contentid, title, contenttypeid, addr1, firstimage, mapx, mapy,
               access_wheelchair, access_visual, access_hearing, access_infant
          from barrier_free ${wsql}
         order by case
@@ -428,6 +432,9 @@ export function buildApp(): Hono {
       category: (r.contenttypeid && CATEGORY_LABELS[r.contenttypeid]) || null,
       region: shortRegion(r.addr1),
       firstimage: r.firstimage || null,
+      // 목록·상세와 같은 표기 — mapx=경도, mapy=위도. 원본에 좌표가 없는 장소는 null 이다.
+      mapx: r.mapx,
+      mapy: r.mapy,
       access: {
         wheelchair: r.access_wheelchair, visual: r.access_visual,
         hearing: r.access_hearing, infant: r.access_infant,

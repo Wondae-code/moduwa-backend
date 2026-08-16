@@ -151,12 +151,15 @@ GET /v1/pet-friendly/1019041
     "contenttypeid": "12", "category": "관광지",
     "region": "서울 종로구",
     "firstimage": "https://tong.visitkorea.or.kr/...jpg",
+    "mapx": 126.9769, "mapy": 37.5796,
     "access": { "wheelchair": true, "visual": true, "hearing": false, "infant": true }
   }]
 }
 ```
 - `category`: 콘텐츠유형 라벨(12관광지·14문화시설·15축제공연행사·25여행코스·28레포츠·32숙박·38쇼핑·39음식점)
 - `region`: 주소 축약("서울특별시 종로구 …" → "서울 종로구")
+- `mapx`/`mapy`: 경도/위도. 목록·상세와 같은 표기이며 원본에 좌표가 없으면 `null`.
+  검색 결과를 플랜 일정에 담거나 지도에 찍을 때 쓴다 — 없으면 클라이언트가 상세를 한 번 더 불러야 한다
 - `access`: 접근성 배지 — 이동(wheelchair)·시각(visual)·청각(hearing)·영유아(infant) 정보 보유 여부
 
 ### GET /v1/barrier-free/:contentId/related — 함께 가볼만한 곳
