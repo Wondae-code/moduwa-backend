@@ -241,7 +241,13 @@ export function buildApp(): Hono {
         orderBy = `md5(contentid || $${orderParams.length}), contentid`;
         break;
       default:       // 'access'
-        orderBy = `${ACCESS_SCORE} desc, contentid`;
+        // 사진 없는 장소는 **감점**으로 뒤로 민다. 걸러내지 않는 이유: 2026-08-16 측정 결과
+        //  사진 유무로 접근성 정보량이 갈리지 않는다(무사진 평균 4.0 / 유사진 4.4, 중앙값 둘 다 4,
+        //  최대 둘 다 18). 즉 사진이 없다는 건 정보가 부실하다는 뜻이 아니라 관광공사가 사진을
+        //  안 올렸다는 뜻뿐이고, 무장애 여행 앱에서 그걸로 5곳 중 1곳(2,045/10,262)을 지울 이유가 없다.
+        //  ⚠️ 점수가 4 언저리에 몰려 있어 감점을 크게 주면 사실상 필터와 같아진다. 3이면
+        //  평범한 무사진 장소(4→1)는 뒤로 가지만 정보가 아주 풍부한 곳(18→15)은 앞에 남는다.
+        orderBy = `(${ACCESS_SCORE} - 3 * (not coalesce(has_image, false))::int) desc, contentid`;
     }
 
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
