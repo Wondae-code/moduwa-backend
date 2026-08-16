@@ -971,7 +971,53 @@ export function buildApp(): Hono {
     return [...days.values()];
   }
 
-  // 내 플랜 목록 — 최근 여행부터. 본문(days)은 싣지 않는다(목록 카드에 필요 없다).
+  /**
+   * 목록 카드용 요약 — 날짜별 **장소 이름만**, 여러 플랜을 한 방에 읽는다(N+1 회피).
+   *
+   * 일정 탭 카드가 "DAY 1  황리단길 - 포석정 - 나정고운모래해변" 처럼 그날 동선을 한 줄로 보여 준다.
+   * 그렇다고 목록 응답에 days 를 통째로 실으면 플랜이 늘수록 응답이 빠르게 커진다 —
+   * 카드에 필요한 것은 이름뿐이라 좌표·카테고리·이미지는 뺀다.
+   *
+   * ⚠️ 항목이 없는 날도 `left join` 으로 남긴다. 빼 버리면 그 뒤 날들의 DAY 번호가 하나씩 당겨져
+   *    상세 화면과 어긋난다(앱은 days 의 순서로 번호를 매긴다).
+   * 메모만 있는 날은 `placeNames` 가 빈 배열이 된다 — 카드는 그 줄을 그리지 않지만 번호는 살아 있다.
+   *
+   * `fallbackImageUrl` 은 첫 장소의 사진이다. 카드가 풀블리드 사진인데 `coverImageURL` 을 채울
+   * 화면이 아직 없어 사실상 늘 비어 있다. 사용자가 직접 고른 값이라는 뜻을 지키려고 그 필드를
+   * 덮어쓰지 않고 따로 내려보낸다.
+   */
+  async function loadSummaries(planIds: string[]) {
+    const empty = new Map<string, { daySummaries: unknown[]; fallbackImageUrl: string | null }>();
+    if (!planIds.length) return empty;
+
+    const rows = (await query<{
+      plan_id: string; day_id: string; day_date: string;
+      place_name: string | null; image_url: string | null;
+    }>(
+      `select d.plan_id, d.id as day_id, to_char(d.date, 'YYYY-MM-DD') as day_date,
+              i.place_name, i.image_url
+         from plan_days d
+         left join plan_items i on i.day_id = d.id and i.kind = 'stop'
+        where d.plan_id = any($1::uuid[])
+        order by d.plan_id, d.position, i.position`, [planIds],
+    )).rows;
+
+    for (const r of rows) {
+      if (!empty.has(r.plan_id)) empty.set(r.plan_id, { daySummaries: [], fallbackImageUrl: null });
+      const entry = empty.get(r.plan_id)!;
+      const days = entry.daySummaries as { id: string; date: string; placeNames: string[] }[];
+
+      let day = days.find((d) => d.id === r.day_id);
+      if (!day) { day = { id: r.day_id, date: r.day_date, placeNames: [] }; days.push(day); }
+
+      if (r.place_name) day.placeNames.push(r.place_name);
+      if (!entry.fallbackImageUrl && r.image_url) entry.fallbackImageUrl = r.image_url;
+    }
+    return empty;
+  }
+
+  // 내 플랜 목록 — 최근 여행부터.
+  //  본문(days)은 싣지 않되, 카드가 그릴 만큼의 요약(`daySummaries`)은 함께 내려보낸다.
   v1.get('/plans', async (c) => {
     const deviceId = deviceIdOf(c);
     if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
@@ -979,11 +1025,18 @@ export function buildApp(): Hono {
     const authorId = await findAuthor(deviceId);
     if (authorId == null) return c.json({ count: 0, items: [] });
 
-    const rows = (await query(
+    const rows = (await query<Record<string, unknown>>(
       `${PLAN_SELECT} where p.author_id = $1 order by p.start_date desc, p.created_at desc`,
       [authorId],
     )).rows;
-    return c.json({ count: rows.length, items: rows });
+
+    const summaries = await loadSummaries(rows.map((r) => r.id as string));
+    const items = rows.map((r) => ({
+      ...r,
+      daySummaries: summaries.get(r.id as string)?.daySummaries ?? [],
+      fallbackImageUrl: summaries.get(r.id as string)?.fallbackImageUrl ?? null,
+    }));
+    return c.json({ count: items.length, items });
   });
 
   // 플랜 상세 — days/items 포함
