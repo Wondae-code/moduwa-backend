@@ -756,7 +756,7 @@ export function buildApp(): Hono {
     // 처음 쓰는 기기라면 닉네임이 반드시 있어야 한다(authors.nickname 은 not null).
     // 이미 아는 기기면 닉네임 생략 가능 — 기존 닉네임을 그대로 재사용한다.
     const knownId = await findAuthor(deviceId);
-    if (knownId == null && !authorNm) {
+    if (await needsNickname(knownId) && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
     }
 
@@ -882,7 +882,7 @@ export function buildApp(): Hono {
 
     // 리뷰 작성과 같은 규칙 — 처음 쓰는 기기는 닉네임이 필수다.
     const knownId = await findAuthor(deviceId);
-    if (knownId == null && !authorNm) {
+    if (await needsNickname(knownId) && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
     }
 
@@ -1174,7 +1174,7 @@ export function buildApp(): Hono {
 
     // 처음 저장하는 기기라면 닉네임이 필요하다(authors.nickname 은 not null).
     const knownId = await findAuthor(deviceId)
-    if (knownId == null && !authorNm) {
+    if (await needsNickname(knownId) && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 저장하는 기기입니다. authorNm 을 함께 보내주세요.' }, 400)
     }
 
@@ -1362,6 +1362,94 @@ export function buildApp(): Hono {
 
   v1.post('/plans/:planId/confirm', (c) => respondConfirm(c, true))
   v1.delete('/plans/:planId/confirm', (c) => respondConfirm(c, false))
+
+  // ── 저장한 장소(북마크) ──────────────────────────────────────────────────────
+
+  /**
+   * 이 기기가 **글을 쓸 수 있는 상태**인지 — 계정이 있고 닉네임이 채워져 있어야 한다.
+   *
+   * 장소 저장은 닉네임 없이도 되어야 해서(북마크 하나 누르자고 이름을 묻는 것은 과하다)
+   * 빈 닉네임의 계정이 생길 수 있다. 그런 계정을 "이미 있는 계정"으로 취급하면 후기·플랜이
+   * 이름을 묻지 않고 빈 작성자로 글을 남기게 된다 — 그래서 닉네임까지 본다.
+   */
+  const needsNickname = async (authorId: number | null): Promise<boolean> => {
+    if (authorId == null) return true
+    const row = (await query<{ nickname: string | null }>(
+      'select nickname from authors where id = $1', [authorId])).rows[0]
+    return !row?.nickname?.trim()
+  }
+
+  /** 저장·좋아요처럼 **이름이 필요 없는** 행동을 위한 계정 확보. 없으면 빈 닉네임으로 만든다. */
+  const ensureAnonymousAuthor = async (deviceId: string): Promise<number> => {
+    const known = await findAuthor(deviceId)
+    if (known != null) return known
+    return (await query<{ id: number }>(
+      `insert into authors (device_id, nickname) values ($1, '')
+       on conflict (device_id) do update set device_id = excluded.device_id
+       returning id`, [deviceId],
+    )).rows[0]!.id
+  }
+
+  /**
+   * 저장 목록 — 카드가 쓰는 값이 무장애 목록과 같아서 `BF_COLS` 를 그대로 돌려준다.
+   * 앱이 목록·검색과 같은 디코딩을 재사용할 수 있다.
+   *
+   * 평점은 barrier_free 에 없다(원본에 그런 값이 없다). 후기에서 집계해 얹는다 —
+   * 시안 카드에 별점이 있고, 그 값을 낼 수 있는 곳이 후기뿐이다.
+   */
+  v1.get('/saved-places', async (c) => {
+    const deviceId = deviceIdOf(c)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+
+    const authorId = await findAuthor(deviceId)
+    if (authorId == null) return c.json({ count: 0, items: [] })
+
+    const rows = (await query(
+      `select ${BF_COLS},
+              s.created_at as "savedAt",
+              r.avg_rating as "avgRating", r.review_count as "reviewCount"
+         from saved_places s
+         join barrier_free b on b.contentid = s.content_id
+         left join lateral (
+           select round(avg(rating)::numeric, 1)::float8 as avg_rating, count(*)::int as review_count
+             from reviews where content_id = s.content_id and rating is not null
+         ) r on true
+        where s.author_id = $1
+        order by s.created_at desc`, [authorId],
+    )).rows
+    return c.json({ count: rows.length, items: rows })
+  })
+
+  /** 저장. 이미 저장돼 있어도 성공으로 둔다 — 두 번 눌렀다고 실패를 보여 줄 이유가 없다. */
+  v1.put('/saved-places/:contentId', async (c) => {
+    const deviceId = deviceIdOf(c)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+
+    const contentId = c.req.param('contentId') ?? ''
+    const exists = (await query('select 1 from barrier_free where contentid = $1', [contentId])).rowCount
+    if (!exists) return c.json({ error: 'not_found', message: '장소를 찾을 수 없습니다.' }, 404)
+
+    const authorId = await ensureAnonymousAuthor(deviceId)
+    await query(
+      `insert into saved_places (author_id, content_id) values ($1, $2)
+       on conflict (author_id, content_id) do nothing`, [authorId, contentId],
+    )
+    return c.json({ contentId, saved: true })
+  })
+
+  v1.delete('/saved-places/:contentId', async (c) => {
+    const deviceId = deviceIdOf(c)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+
+    const authorId = await findAuthor(deviceId)
+    const contentId = c.req.param('contentId') ?? ''
+    // 저장한 적 없는 장소를 지워도 성공이다 — 결과("저장돼 있지 않다")가 같다.
+    if (authorId != null) {
+      await query('delete from saved_places where author_id = $1 and content_id = $2',
+        [authorId, contentId])
+    }
+    return c.json({ contentId, saved: false })
+  })
 
   app.route('/v1', v1);
 
