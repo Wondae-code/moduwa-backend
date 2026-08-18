@@ -1485,19 +1485,29 @@ export function buildApp(): Hono {
     return map
   }
 
-  // 최근 글부터. deviceId 를 주면 그 기기가 쓴 글만.
+  // 최근 글부터.
+  //  deviceId 를 주면 그 기기가 쓴 글만, contentId 를 주면 그 장소를 붙인 글만.
+  //  (장소 후기 화면의 "여행 게시글" 탭이 후자를 쓴다 — post_places 에 인덱스가 있다.)
   v1.get('/posts', async (c) => {
     const { limit, offset } = paging(c)
     const deviceId = deviceIdOf(c)
+    const contentId = c.req.query('contentId')?.trim()
 
-    let where = ''
+    const conditions: string[] = []
     const params: unknown[] = []
     if (deviceId) {
       const authorId = await findAuthor(deviceId)
       if (authorId == null) return c.json({ count: 0, items: [] })
       params.push(authorId)
-      where = 'where p.author_id = $1'
+      conditions.push(`p.author_id = $${params.length}`)
     }
+    if (contentId) {
+      params.push(contentId)
+      // exists 로 묻는다 — join 하면 한 글에 같은 장소가 여러 번 붙었을 때 글이 중복된다.
+      conditions.push(
+        `exists (select 1 from post_places pp where pp.post_id = p.id and pp.content_id = $${params.length})`)
+    }
+    const where = conditions.length ? `where ${conditions.join(' and ')}` : ''
 
     const rows = (await query<Record<string, unknown>>(
       `${POST_SELECT} ${where} order by p.created_at desc limit ${limit} offset ${offset}`, params,
