@@ -1451,6 +1451,170 @@ export function buildApp(): Hono {
     return c.json({ contentId, saved: false })
   })
 
+  // ── 여행 게시글 ─────────────────────────────────────────────────────────────
+
+  /** 게시글 본문 상한. 후기(2000)보다 넉넉하다 — 게시글은 글 자체가 목적이다. */
+  const MAX_POST_BODY = 5000
+  const MAX_POST_PLACES = 20
+  const MAX_POST_IMAGES = 5
+
+  /** 목록·단건 공통 select. 붙인 장소는 별도 쿼리로 모아 붙인다(N+1 회피). */
+  const POST_SELECT = `
+    select p.id, p.body, p.image_urls as "imageURLs",
+           a.nickname as author,
+           to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
+           to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
+      from posts p
+      join authors a on a.id = p.author_id`
+
+  /** 여러 게시글의 장소를 한 방에 읽어 id 별로 묶는다. */
+  const loadPostPlaces = async (postIds: string[]) => {
+    const map = new Map<string, unknown[]>()
+    if (!postIds.length) return map
+    const rows = (await query<{
+      post_id: string; content_id: string; place_name: string; region: string | null
+    }>(
+      `select post_id, content_id, place_name, region
+         from post_places where post_id = any($1::uuid[]) order by post_id, position`,
+      [postIds],
+    )).rows
+    for (const r of rows) {
+      if (!map.has(r.post_id)) map.set(r.post_id, [])
+      map.get(r.post_id)!.push({ contentID: r.content_id, name: r.place_name, region: r.region })
+    }
+    return map
+  }
+
+  // 최근 글부터. deviceId 를 주면 그 기기가 쓴 글만.
+  v1.get('/posts', async (c) => {
+    const { limit, offset } = paging(c)
+    const deviceId = deviceIdOf(c)
+
+    let where = ''
+    const params: unknown[] = []
+    if (deviceId) {
+      const authorId = await findAuthor(deviceId)
+      if (authorId == null) return c.json({ count: 0, items: [] })
+      params.push(authorId)
+      where = 'where p.author_id = $1'
+    }
+
+    const rows = (await query<Record<string, unknown>>(
+      `${POST_SELECT} ${where} order by p.created_at desc limit ${limit} offset ${offset}`, params,
+    )).rows
+    const places = await loadPostPlaces(rows.map((r) => r.id as string))
+    const items = rows.map((r) => ({ ...r, places: places.get(r.id as string) ?? [] }))
+    return c.json({ count: items.length, limit, offset, items })
+  })
+
+  v1.get('/posts/:postId', async (c) => {
+    const postId = c.req.param('postId') ?? ''
+    const post = (await query<Record<string, unknown>>(
+      `${POST_SELECT} where p.id = $1`, [postId],
+    )).rows[0]
+    if (!post) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+    return c.json({ ...post, places: (await loadPostPlaces([postId])).get(postId) ?? [] })
+  })
+
+  /**
+   * 게시글 작성.
+   *
+   * 후기와 같은 규칙으로 작성자를 확보한다 — 글은 사람에게 귀속되는 내용이라 **닉네임이 필요하다**.
+   * 저장만 한 기기(빈 닉네임)도 여기서는 이름을 요구한다(`needsNickname` 참고).
+   */
+  v1.post('/posts', async (c) => {
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400)
+    }
+    const p = payload as Record<string, unknown>
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+
+    const deviceId = str(p.deviceId)
+    const authorNm = str(p.authorNm)
+    const body = str(p.body)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!body) return c.json({ error: 'missing_body', message: '내용은 비어 있을 수 없습니다.' }, 400)
+    if (body.length > MAX_POST_BODY) {
+      return c.json({ error: 'body_too_long', message: `내용은 ${MAX_POST_BODY}자 이하여야 합니다.` }, 400)
+    }
+
+    const imageURLs = Array.isArray(p.imageURLs) ? p.imageURLs.filter((u) => typeof u === 'string') : []
+    if (imageURLs.length > MAX_POST_IMAGES) {
+      return c.json({ error: 'too_many_images', message: `사진은 ${MAX_POST_IMAGES}장 이하여야 합니다.` }, 400)
+    }
+
+    const rawPlaces = Array.isArray(p.places) ? p.places : []
+    if (rawPlaces.length > MAX_POST_PLACES) {
+      return c.json({ error: 'too_many_places', message: `장소는 ${MAX_POST_PLACES}곳 이하여야 합니다.` }, 400)
+    }
+    const places = rawPlaces.map((v) => {
+      const o = (v ?? {}) as Record<string, unknown>
+      return { contentID: str(o.contentID), name: str(o.name), region: str(o.region) }
+    })
+    if (places.some((pl) => !pl.contentID || !pl.name)) {
+      return c.json({ error: 'invalid_place', message: '장소는 contentID 와 name 이 필요합니다.' }, 400)
+    }
+
+    const knownId = await findAuthor(deviceId)
+    if (await needsNickname(knownId) && !authorNm) {
+      return c.json({
+        error: 'missing_authorNm',
+        message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.',
+      }, 400)
+    }
+
+    const postId = await withTransaction(async (client) => {
+      // 작성자 확보. 이미 이 기기에 묶인 계정이 있으면 그것을 쓰고, 닉네임을 보냈으면 갱신한다.
+      const author = knownId != null
+        ? (await client.query<{ id: number }>(
+            `update authors set nickname = coalesce(nullif($2, ''), nickname)
+              where id = $1 returning id`, [knownId, authorNm],
+          )).rows[0]!
+        : (await client.query<{ id: number }>(
+            `insert into authors (device_id, nickname) values ($1, $2) returning id`,
+            [deviceId, authorNm],
+          )).rows[0]!
+      await bindDevice(client, deviceId, author.id)
+
+      const created = (await client.query<{ id: string }>(
+        `insert into posts (author_id, body, image_urls) values ($1, $2, $3) returning id`,
+        [author.id, body, imageURLs],
+      )).rows[0]!
+
+      for (const [index, pl] of places.entries()) {
+        await client.query(
+          `insert into post_places (post_id, position, content_id, place_name, region)
+           values ($1, $2, $3, $4, $5)`,
+          [created.id, index, pl.contentID, pl.name, pl.region || null],
+        )
+      }
+      return created.id
+    })
+
+    const post = (await query<Record<string, unknown>>(
+      `${POST_SELECT} where p.id = $1`, [postId],
+    )).rows[0]!
+    return c.json({ ...post, places: (await loadPostPlaces([postId])).get(postId) ?? [] }, 201)
+  })
+
+  v1.delete('/posts/:postId', async (c) => {
+    const deviceId = deviceIdOf(c)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    const authorId = await findAuthor(deviceId)
+    if (authorId == null) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+
+    const result = await query('delete from posts where id = $1 and author_id = $2',
+      [c.req.param('postId'), authorId])
+    if (result.rowCount === 0) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+    return c.body(null, 204)
+  })
+
   app.route('/v1', v1);
 
   // 수집 현황 대시보드 — 비밀번호가 설정된 경우에만 라우트를 연다.
