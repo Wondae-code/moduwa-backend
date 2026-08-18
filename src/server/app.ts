@@ -1459,13 +1459,26 @@ export function buildApp(): Hono {
   const MAX_POST_IMAGES = 5
 
   /** 목록·단건 공통 select. 붙인 장소는 별도 쿼리로 모아 붙인다(N+1 회피). */
+  /// $1 은 **보는 사람의 author_id**(없으면 null) — "내가 좋아요를 눌렀나"를 함께 준다.
+  ///  숫자만 주면 버튼이 눌린 상태를 그릴 수 없다.
   const POST_SELECT = `
     select p.id, p.body, p.image_urls as "imageURLs",
+           p.access_features as "accessFeatures",
            a.nickname as author,
+           (select count(*)::int from post_likes pl where pl.post_id = p.id) as "likeCount",
+           (select count(*)::int from post_comments pc where pc.post_id = p.id) as "commentCount",
+           exists (
+             select 1 from post_likes pl
+              where pl.post_id = p.id and pl.author_id = $VIEWER
+           ) as "likedByMe",
            to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
       from posts p
       join authors a on a.id = p.author_id`
+
+  /** 보는 사람 자리를 실제 파라미터 번호로 바꿔 준다. */
+  const postSelect = (viewerParam: number) =>
+    POST_SELECT.replace('$VIEWER', `$${viewerParam}`)
 
   /** 여러 게시글의 장소를 한 방에 읽어 id 별로 묶는다. */
   const loadPostPlaces = async (postIds: string[]) => {
@@ -1493,12 +1506,14 @@ export function buildApp(): Hono {
     const deviceId = deviceIdOf(c)
     const contentId = c.req.query('contentId')?.trim()
 
+    // 보는 사람. 로그인이 없으니 기기가 곧 사람이고, 없으면 null(아무것도 안 누른 상태).
+    const viewerId = deviceId ? await findAuthor(deviceId) : null
+
     const conditions: string[] = []
-    const params: unknown[] = []
+    const params: unknown[] = [viewerId]
     if (deviceId) {
-      const authorId = await findAuthor(deviceId)
-      if (authorId == null) return c.json({ count: 0, items: [] })
-      params.push(authorId)
+      if (viewerId == null) return c.json({ count: 0, items: [] })
+      params.push(viewerId)
       conditions.push(`p.author_id = $${params.length}`)
     }
     if (contentId) {
@@ -1510,7 +1525,7 @@ export function buildApp(): Hono {
     const where = conditions.length ? `where ${conditions.join(' and ')}` : ''
 
     const rows = (await query<Record<string, unknown>>(
-      `${POST_SELECT} ${where} order by p.created_at desc limit ${limit} offset ${offset}`, params,
+      `${postSelect(1)} ${where} order by p.created_at desc limit ${limit} offset ${offset}`, params,
     )).rows
     const places = await loadPostPlaces(rows.map((r) => r.id as string))
     const items = rows.map((r) => ({ ...r, places: places.get(r.id as string) ?? [] }))
@@ -1519,8 +1534,10 @@ export function buildApp(): Hono {
 
   v1.get('/posts/:postId', async (c) => {
     const postId = c.req.param('postId') ?? ''
+    const deviceId = deviceIdOf(c)
+    const viewerId = deviceId ? await findAuthor(deviceId) : null
     const post = (await query<Record<string, unknown>>(
-      `${POST_SELECT} where p.id = $1`, [postId],
+      `${postSelect(2)} where p.id = $1`, [postId, viewerId],
     )).rows[0]
     if (!post) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
     return c.json({ ...post, places: (await loadPostPlaces([postId])).get(postId) ?? [] })
@@ -1559,6 +1576,12 @@ export function buildApp(): Hono {
       return c.json({ error: 'too_many_images', message: `사진은 ${MAX_POST_IMAGES}장 이하여야 합니다.` }, 400)
     }
 
+    // 무장애 정보. 값을 검증하지 않는다 — 앱이 아이콘을 늘리면 서버 배포 없이 따라가야 하고,
+    // 모르는 코드는 앱이 뱃지를 안 그리면 그만이다(plans.themes 와 같은 판단).
+    const accessFeatures = Array.isArray(p.accessFeatures)
+      ? [...new Set(p.accessFeatures.filter((v) => typeof v === 'string' && v.trim()).map(String))].slice(0, 10)
+      : []
+
     const rawPlaces = Array.isArray(p.places) ? p.places : []
     if (rawPlaces.length > MAX_POST_PLACES) {
       return c.json({ error: 'too_many_places', message: `장소는 ${MAX_POST_PLACES}곳 이하여야 합니다.` }, 400)
@@ -1593,8 +1616,9 @@ export function buildApp(): Hono {
       await bindDevice(client, deviceId, author.id)
 
       const created = (await client.query<{ id: string }>(
-        `insert into posts (author_id, body, image_urls) values ($1, $2, $3) returning id`,
-        [author.id, body, imageURLs],
+        `insert into posts (author_id, body, image_urls, access_features)
+         values ($1, $2, $3, $4) returning id`,
+        [author.id, body, imageURLs, accessFeatures],
       )).rows[0]!
 
       for (const [index, pl] of places.entries()) {
@@ -1608,7 +1632,7 @@ export function buildApp(): Hono {
     })
 
     const post = (await query<Record<string, unknown>>(
-      `${POST_SELECT} where p.id = $1`, [postId],
+      `${postSelect(2)} where p.id = $1`, [postId, knownId],
     )).rows[0]!
     return c.json({ ...post, places: (await loadPostPlaces([postId])).get(postId) ?? [] }, 201)
   })
@@ -1623,6 +1647,120 @@ export function buildApp(): Hono {
       [c.req.param('postId'), authorId])
     if (result.rowCount === 0) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
     return c.body(null, 204)
+  })
+
+  // ── 게시글 좋아요 ───────────────────────────────────────────────────────────
+
+  /**
+   * 좋아요 켜기/끄기. 둘 다 멱등이다 — 두 번 눌렀다고 실패를 보여 줄 이유가 없다.
+   *
+   * 좋아요는 **이름이 필요 없는 행동**이라 닉네임을 묻지 않는다(저장과 같은 판단) —
+   * 하트 하나 누르자고 이름을 요구하면 대부분은 그냥 떠난다.
+   */
+  const setPostLike = async (c: Context, liked: boolean) => {
+    const deviceId = deviceIdOf(c)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+
+    const postId = c.req.param('postId') ?? ''
+    const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
+    if (!exists) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+
+    if (liked) {
+      const authorId = await ensureAnonymousAuthor(deviceId)
+      await query(
+        `insert into post_likes (post_id, author_id) values ($1, $2)
+         on conflict (post_id, author_id) do nothing`, [postId, authorId])
+    } else {
+      const authorId = await findAuthor(deviceId)
+      if (authorId != null) {
+        await query('delete from post_likes where post_id = $1 and author_id = $2', [postId, authorId])
+      }
+    }
+
+    const count = (await query<{ n: number }>(
+      'select count(*)::int n from post_likes where post_id = $1', [postId])).rows[0]!.n
+    return c.json({ postId, likedByMe: liked, likeCount: count })
+  }
+
+  v1.put('/posts/:postId/like', (c) => setPostLike(c, true))
+  v1.delete('/posts/:postId/like', (c) => setPostLike(c, false))
+
+  // ── 게시글 댓글 ─────────────────────────────────────────────────────────────
+
+  const POST_COMMENT_SELECT = `
+    select c.id, a.nickname as author, c.body,
+           to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt"
+      from post_comments c
+      join authors a on a.id = c.author_id`
+
+  // 오래된 순 — 대화 순서다(리뷰 댓글과 같다).
+  v1.get('/posts/:postId/comments', async (c) => {
+    const { limit, offset } = paging(c)
+    const postId = c.req.param('postId') ?? ''
+    const total = (await query<{ n: number }>(
+      'select count(*)::int n from post_comments where post_id = $1', [postId])).rows[0]!.n
+    const rows = (await query(
+      `${POST_COMMENT_SELECT} where c.post_id = $1
+        order by c.created_at limit ${limit} offset ${offset}`, [postId],
+    )).rows
+    return c.json({ total, limit, offset, count: rows.length, items: rows })
+  })
+
+  /** 댓글은 사람에게 귀속되는 글이라 **닉네임이 필요하다**(좋아요와 다르다). */
+  v1.post('/posts/:postId/comments', async (c) => {
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400)
+    }
+    const p = payload as Record<string, unknown>
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+
+    const deviceId = str(p.deviceId)
+    const authorNm = str(p.authorNm)
+    const body = str(p.body)
+    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!body) return c.json({ error: 'missing_body', message: '댓글은 비어 있을 수 없습니다.' }, 400)
+    if (body.length > 1000) {
+      return c.json({ error: 'body_too_long', message: '댓글은 1000자 이하여야 합니다.' }, 400)
+    }
+
+    const postId = c.req.param('postId') ?? ''
+    const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
+    if (!exists) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+
+    const knownId = await findAuthor(deviceId)
+    if (await needsNickname(knownId) && !authorNm) {
+      return c.json({
+        error: 'missing_authorNm',
+        message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.',
+      }, 400)
+    }
+
+    const commentId = await withTransaction(async (client) => {
+      const author = knownId != null
+        ? (await client.query<{ id: number }>(
+            `update authors set nickname = coalesce(nullif($2, ''), nickname)
+              where id = $1 returning id`, [knownId, authorNm],
+          )).rows[0]!
+        : (await client.query<{ id: number }>(
+            `insert into authors (device_id, nickname) values ($1, $2) returning id`,
+            [deviceId, authorNm],
+          )).rows[0]!
+      await bindDevice(client, deviceId, author.id)
+      return (await client.query<{ id: string }>(
+        'insert into post_comments (post_id, author_id, body) values ($1, $2, $3) returning id',
+        [postId, author.id, body],
+      )).rows[0]!.id
+    })
+
+    const comment = (await query<Record<string, unknown>>(
+      `${POST_COMMENT_SELECT} where c.id = $1`, [commentId])).rows[0]!
+    return c.json(comment, 201)
   })
 
   app.route('/v1', v1);
