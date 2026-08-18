@@ -85,6 +85,17 @@ export function buildApp(): Hono {
       'GET /v1/plans/:planId?deviceId=',
       'PUT /v1/plans/:planId  {deviceId, authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
       'DELETE /v1/plans/:planId?deviceId=',
+      'GET /v1/saved-places?deviceId=',
+      'PUT /v1/saved-places/:contentId  {deviceId}',
+      'DELETE /v1/saved-places/:contentId?deviceId=',
+      'GET /v1/posts?deviceId=&mine=&liked=&contentId=&limit=&offset=  (deviceId 는 보는 사람일 뿐 목록을 좁히지 않는다)',
+      'GET /v1/posts/:postId?deviceId=',
+      'POST /v1/posts  {deviceId, body, authorNm?, imageURLs?, places?, accessFeatures?}',
+      'DELETE /v1/posts/:postId?deviceId=',
+      'PUT /v1/posts/:postId/like?deviceId=',
+      'DELETE /v1/posts/:postId/like?deviceId=',
+      'GET /v1/posts/:postId/comments?limit=&offset=',
+      'POST /v1/posts/:postId/comments  {body, authorNm?, deviceId}',
       ...(config.dashboard.password ? ['GET /dashboard  (수집 현황 대시보드 — 비밀번호 로그인)'] : []),
     ],
     source: '한국관광공사 TourAPI · data.go.kr (출처 표시 필요)',
@@ -1499,22 +1510,34 @@ export function buildApp(): Hono {
   }
 
   // 최근 글부터.
-  //  deviceId 를 주면 그 기기가 쓴 글만, contentId 를 주면 그 장소를 붙인 글만.
-  //  (장소 후기 화면의 "여행 게시글" 탭이 후자를 쓴다 — post_places 에 인덱스가 있다.)
+  //
+  //  ⚠️ **deviceId 는 "보는 사람"일 뿐 목록을 좁히지 않는다.** 예전에는 deviceId 가 있으면
+  //  내 글만 주도록 했는데, 그러면 `likedByMe` 를 채우려고 deviceId 를 실은 순간 목록이
+  //  내 글로 좁혀져 버린다. 그래서 클라이언트는 전체 목록에 deviceId 를 못 실었고,
+  //  viewerId 가 늘 null 이 되어 **하트가 어디서도 눌린 상태로 그려지지 않았다**
+  //  (`author_id = null` 은 절대 참이 아니다, 2026-08-18 확인). 두 뜻을 갈라 놓는다:
+  //   - deviceId : 보는 사람 (하트가 눌렸는지)
+  //   - mine     : 그 기기가 쓴 글만
+  //   - liked    : 그 기기가 좋아요한 글만 (저장 탭의 "좋아요한 게시물")
+  //   - contentId: 그 장소를 붙인 글만 (장소 후기 화면의 "여행 게시글" 탭)
   v1.get('/posts', async (c) => {
     const { limit, offset } = paging(c)
     const deviceId = deviceIdOf(c)
     const contentId = c.req.query('contentId')?.trim()
+    const mine = c.req.query('mine') === 'true'
+    const liked = c.req.query('liked') === 'true'
 
     // 보는 사람. 로그인이 없으니 기기가 곧 사람이고, 없으면 null(아무것도 안 누른 상태).
     const viewerId = deviceId ? await findAuthor(deviceId) : null
 
     const conditions: string[] = []
     const params: unknown[] = [viewerId]
-    if (deviceId) {
-      if (viewerId == null) return c.json({ count: 0, items: [] })
-      params.push(viewerId)
-      conditions.push(`p.author_id = $${params.length}`)
+    // 내 것을 묻는 필터는 사람이 있어야 성립한다. 아직 아무것도 쓴 적 없는 기기라
+    // authors 행이 없으면 결과는 빈 목록이 맞다 — 전체 목록을 주면 안 된다.
+    if ((mine || liked) && viewerId == null) return c.json({ count: 0, limit, offset, items: [] })
+    if (mine) conditions.push(`p.author_id = $1`)
+    if (liked) {
+      conditions.push(`exists (select 1 from post_likes pl where pl.post_id = p.id and pl.author_id = $1)`)
     }
     if (contentId) {
       params.push(contentId)
@@ -1524,8 +1547,16 @@ export function buildApp(): Hono {
     }
     const where = conditions.length ? `where ${conditions.join(' and ')}` : ''
 
+    // 좋아요 목록은 **내가 누른 순서**로 본다 — 글이 쓰인 시각이 아니라 내가 담은 시각이
+    //  그 목록의 축이다(저장 목록이 저장한 순서인 것과 같다). POST_SELECT 를 건드리지 않고
+    //  order by 안에서 묻는다.
+    const order = liked
+      ? `(select pl.created_at from post_likes pl
+            where pl.post_id = p.id and pl.author_id = $1) desc`
+      : `p.created_at desc`
+
     const rows = (await query<Record<string, unknown>>(
-      `${postSelect(1)} ${where} order by p.created_at desc limit ${limit} offset ${offset}`, params,
+      `${postSelect(1)} ${where} order by ${order} limit ${limit} offset ${offset}`, params,
     )).rows
     const places = await loadPostPlaces(rows.map((r) => r.id as string))
     const items = rows.map((r) => ({ ...r, places: places.get(r.id as string) ?? [] }))
