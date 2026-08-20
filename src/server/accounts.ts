@@ -30,11 +30,34 @@ export type SignInResult = {
   merged: boolean;
   /** 이번 로그인으로 계정이 새로 만들어졌는지(= 가입) */
   created: boolean;
+  email: string | null;
+  emailVerified: boolean;
 };
 
 // 새 계정에 닉네임이 없을 때의 값. authors.nickname 이 not null 이라 무언가는 있어야 하고,
 // 소셜 프로바이더가 이름을 항상 주지는 않는다(애플은 최초 인가 때만, 그마저 생략 가능).
 const FALLBACK_NICKNAME = '여행자';
+
+/**
+ * 이메일을 신원 키로 쓸 수 있는 형태로 만든다.
+ * (provider, subject) 유니크가 "한 이메일에 계정 하나"를 보장하는데, 소문자화하지 않으면
+ * Foo@x.com 과 foo@x.com 이 서로 다른 계정이 되어 그 보장이 깨진다.
+ * ⚠️ 이메일을 쓰거나 찾는 모든 경로가 이 함수를 통과해야 한다.
+ */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/** 이메일 신원 조회 — 로그인 시 비밀번호를 대조하기 위한 것. 없으면 null. */
+export async function findEmailIdentity(
+  email: string,
+): Promise<{ authorId: number; passwordHash: string | null } | null> {
+  const row = (await query<{ author_id: number; password_hash: string | null }>(
+    "select author_id, password_hash from author_identities where provider = 'email' and subject = $1",
+    [normalizeEmail(email)],
+  )).rows[0];
+  return row ? { authorId: row.author_id, passwordHash: row.password_hash } : null;
+}
 
 /** 기기에 묶인 계정. author_devices 가 정본이고 authors.device_id 는 구버전 폴백이다. */
 export async function findAuthorByDevice(deviceId: string): Promise<number | null> {
@@ -79,6 +102,8 @@ export async function signIn(params: {
   identity: VerifiedIdentity;
   deviceId: string;
   nickname?: string;
+  /** 이메일 가입에서만 쓴다. 신원을 **처음 만들 때만** 반영된다(로그인은 비밀번호를 덮지 않는다). */
+  passwordHash?: string | null;
 }): Promise<SignInResult> {
   const { identity, deviceId } = params;
   const nickname = (params.nickname ?? '').trim();
@@ -123,12 +148,12 @@ export async function signIn(params: {
 
     if (!existing) {
       await client.query(
-        `insert into author_identities (author_id, provider, subject, email)
-         values ($1, $2, $3, $4)
+        `insert into author_identities (author_id, provider, subject, email, password_hash)
+         values ($1, $2, $3, $4, $5)
          on conflict (provider, subject) do update
            set author_id = excluded.author_id, email = coalesce(excluded.email, author_identities.email),
                updated_at = now()`,
-        [authorId, identity.provider, identity.subject, identity.email ?? null],
+        [authorId, identity.provider, identity.subject, identity.email ?? null, params.passwordHash ?? null],
       );
     }
 
@@ -145,10 +170,13 @@ export async function signIn(params: {
     }
     if (deviceId) await touchDevice(client, deviceId, authorId);
 
-    const row = (await client.query<{ uuid: string; nickname: string }>(
-      'select uuid, nickname from authors where id = $1', [authorId],
+    const row = (await client.query<{ uuid: string; nickname: string; email: string | null; verified: Date | null }>(
+      'select uuid, nickname, email, email_verified_at as verified from authors where id = $1', [authorId],
     )).rows[0]!;
-    return { authorId, uuid: row.uuid, nickname: row.nickname, merged, created };
+    return {
+      authorId, uuid: row.uuid, nickname: row.nickname, merged, created,
+      email: row.email, emailVerified: row.verified != null,
+    };
   });
 }
 
@@ -194,11 +222,41 @@ async function isAnonymous(client: pg.PoolClient, authorId: number): Promise<boo
 
 /**
  * 익명 계정이 가진 것을 계정으로 옮긴다.
+ *
+ * ⚠️ **authors 를 참조하는 테이블을 새로 만들면 반드시 여기에 추가할 것.**
+ *    빠뜨리면 호출부가 옮기고 남은 익명 행을 지울 때 on delete cascade 로 **조용히 함께 삭제된다.**
+ *    (실제로 025~027 의 저장·게시글·좋아요가 그렇게 빠져 있었다)
+ *
  * reviews.author_nm 은 건드리지 않는다 — 작성 시점의 표시 이름 스냅샷이고, 016 이 그 값을
  * 키로 UPDATE 하기 때문에 바꾸면 다른 마이그레이션이 깨진다.
  */
 async function moveOwnedRows(client: pg.PoolClient, from: number, to: number): Promise<void> {
-  for (const table of ['reviews', 'plans', 'review_comments']) {
+  // ① author_id 가 유일성 제약에 안 걸리는 테이블 — 그냥 넘긴다.
+  for (const table of ['reviews', 'plans', 'review_comments', 'posts', 'post_comments']) {
     await client.query(`update ${table} set author_id = $2 where author_id = $1`, [from, to]);
   }
+
+  // ② author_id 가 PK 의 일부인 테이블 — 같은 대상을 양쪽 계정이 이미 갖고 있으면 PK 가 충돌한다.
+  //    (폰과 태블릿에서 같은 장소를 각각 저장해 둔 경우처럼 실제로 흔하다)
+  //    그대로 update 하면 병합 트랜잭션 전체가 실패하므로, 계정에 없는 것만 옮기고
+  //    이미 갖고 있어 옮길 수 없는 중복은 버린다 — 어차피 결과가 같다(저장했다/눌렀다).
+  await moveUnique(client, 'saved_places', 'content_id', from, to);
+  await moveUnique(client, 'post_likes', 'post_id', from, to);
+}
+
+/** (author_id, key) 가 PK 인 테이블을 옮긴다. 중복은 옮기지 않고 버린다. */
+async function moveUnique(
+  client: pg.PoolClient,
+  table: 'saved_places' | 'post_likes',
+  key: 'content_id' | 'post_id',
+  from: number,
+  to: number,
+): Promise<void> {
+  await client.query(
+    `update ${table} s set author_id = $2
+      where s.author_id = $1
+        and not exists (select 1 from ${table} t where t.author_id = $2 and t.${key} = s.${key})`,
+    [from, to],
+  );
+  await client.query(`delete from ${table} where author_id = $1`, [from]);
 }

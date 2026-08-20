@@ -10,7 +10,9 @@ import { config } from '../config';
 import { query, withTransaction } from '../db';
 import { bindDevice, findAuthorByDevice } from './accounts';
 import { buildDashboard } from './dashboard';
-import { apiKeyAuth, rateLimit } from './middleware';
+import { buildAuthRoutes } from './auth-routes';
+import type { AppEnv } from './middleware';
+import { apiKeyAuth, rateLimit, sessionAuth } from './middleware';
 
 // ── 후기 사진 저장 ────────────────────────────────────────────────────────────
 //  파일명은 내용의 sha256. 같은 사진을 두 번 올려도 한 번만 저장되고 이름이 충돌하지
@@ -47,14 +49,15 @@ function paging(c: { req: { query: (k: string) => string | undefined } }): { lim
   return { limit, offset };
 }
 
-export function buildApp(): Hono {
-  const app = new Hono();
+export function buildApp(): Hono<AppEnv> {
+  const app = new Hono<AppEnv>();
 
   const origins = config.api.allowedOrigins;
   app.use('*', cors({
     origin: origins.includes('*') || origins.length === 0 ? '*' : origins,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // 쓰기: 후기(POST) · 플랜(PUT/DELETE)
-    allowHeaders: ['authorization', 'x-api-key', 'content-type'],
+    // x-session-token: 사용자 로그인 세션. authorization 은 이미 API 키가 쓰고 있어 겹칠 수 없다.
+    allowHeaders: ['authorization', 'x-api-key', 'x-session-token', 'content-type'],
   }));
 
   // 공개 엔드포인트 (인증 불필요)
@@ -134,9 +137,15 @@ export function buildApp(): Hono {
   });
 
   // 이하 /v1/* 은 인증 + 레이트리밋 적용
-  const v1 = new Hono();
+  const v1 = new Hono<AppEnv>();
   v1.use('*', apiKeyAuth);
   v1.use('*', rateLimit);
+  // 사용자 신원 해석. 토큰이 없으면 통과시키므로 익명 요청은 종전대로 동작한다.
+  //  ⚠️ apiKeyAuth 뒤에 둔다 — API 키도 없는 요청에 DB 를 치지 않기 위함이다.
+  v1.use('*', sessionAuth);
+
+  // ── 계정(024·028·029) ───────────────────────────────────────────────────────
+  v1.route('/auth', buildAuthRoutes());
 
   const PET_COLS = `contentid, title, contenttypeid, addr1, addr2, tel, mapx, mapy,
     firstimage, firstimage2, ldong_regn_cd, ldong_signgu_cd,
@@ -698,7 +707,7 @@ export function buildApp(): Hono {
     const contentId = str(p.contentId) || null;
     const rating = p.rating;
 
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId(기기 식별자)는 필수입니다.' }, 400);
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId(기기 식별자)는 필수입니다.' }, 400);
     if (deviceId.length > 128) return c.json({ error: 'invalid_deviceId', message: 'deviceId 는 128자 이하여야 합니다.' }, 400);
     if (!locationNm) return c.json({ error: 'missing_locationNm', message: 'locationNm(장소명)은 필수입니다.' }, 400);
     if (locationNm.length > 200) return c.json({ error: 'invalid_locationNm', message: 'locationNm 은 200자 이하여야 합니다.' }, 400);
@@ -766,7 +775,7 @@ export function buildApp(): Hono {
 
     // 처음 쓰는 기기라면 닉네임이 반드시 있어야 한다(authors.nickname 은 not null).
     // 이미 아는 기기면 닉네임 생략 가능 — 기존 닉네임을 그대로 재사용한다.
-    const knownId = await findAuthor(deviceId);
+    const knownId = await resolveAuthor(c, deviceId);
     if (await needsNickname(knownId) && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
     }
@@ -786,7 +795,7 @@ export function buildApp(): Hono {
           )).rows[0];
       // 위 사전 확인을 통과했으므로 정상 경로에서는 항상 존재한다(동시 삭제 시에만 없음).
       if (!author) throw new Error('author_upsert_failed');
-      await bindDevice(client, deviceId, author.id);
+      if (deviceId) await bindDevice(client, deviceId, author.id);
 
       // author_nm 은 레거시 표시용 컬럼 — 정규화된 닉네임과 어긋나지 않게 같은 값을 넣는다.
       const inserted = (await client.query<{ id: number }>(
@@ -878,7 +887,7 @@ export function buildApp(): Hono {
     const bodyText = str(p.body);
     const authorNm = str(p.authorNm);
 
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId(기기 식별자)는 필수입니다.' }, 400);
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId(기기 식별자)는 필수입니다.' }, 400);
     if (deviceId.length > 128) return c.json({ error: 'invalid_deviceId', message: 'deviceId 는 128자 이하여야 합니다.' }, 400);
     if (!bodyText) return c.json({ error: 'missing_body', message: '댓글 내용은 비어 있을 수 없습니다.' }, 400);
     if (bodyText.length > MAX_COMMENT_LEN) {
@@ -892,7 +901,7 @@ export function buildApp(): Hono {
     if (!review) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
 
     // 리뷰 작성과 같은 규칙 — 처음 쓰는 기기는 닉네임이 필수다.
-    const knownId = await findAuthor(deviceId);
+    const knownId = await resolveAuthor(c, deviceId);
     if (await needsNickname(knownId) && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 작성하는 기기입니다. authorNm(닉네임)을 함께 보내주세요.' }, 400);
     }
@@ -909,7 +918,7 @@ export function buildApp(): Hono {
              returning id`, [deviceId, authorNm],
           )).rows[0];
       if (!author) throw new Error('author_upsert_failed');
-      await bindDevice(client, deviceId, author.id);
+      if (deviceId) await bindDevice(client, deviceId, author.id);
 
       const inserted = (await client.query<{ id: number }>(
         'insert into review_comments (review_id, author_id, body) values ($1, $2, $3) returning id',
@@ -931,13 +940,29 @@ export function buildApp(): Hono {
   //  플랜 본문(days/items)은 통째로 교체한다 — 순서 바꾸기·장소 추가·메모가 한 번에 일어나는
   //  편집이라 부분 갱신 API 를 여러 개 두면 클라이언트가 순서를 맞추다 어긋난다.
 
-  /** deviceId 로 작성자를 찾는다. 없으면 null (플랜이 하나도 없는 기기다). */
-  //  024 이후 정본은 author_devices 다 — 로그아웃하면 그 바인딩이 끊기고, 같은 기기의
-  //  다음 활동은 새 빈 계정을 받는다. authors.device_id 직접 조회로 돌아가면 끊은 바인딩이
-  //  되살아나 로그아웃한 기기에 계정 데이터가 다시 보인다.
-  const findAuthor = findAuthorByDevice;
+  /**
+   * 이 요청의 작성자. **세션이 정본이고 deviceId 는 구버전 앱 폴백이다.**
+   *
+   * 로그인한 요청에서 deviceId 를 신뢰하면 안 되는 이유(024 주석):
+   * 계정에 기기가 여러 대 묶인 뒤에는 기기 한 대의 deviceId 유출이 그 기기가 아니라
+   * **계정 전체**를 여는 문제가 된다. 세션이 있으면 deviceId 는 "어느 기기인가"로만 쓴다.
+   *
+   * deviceId 폴백은 구버전 앱이 빠질 때까지만 유지한다(029 이후 별도 정리).
+   */
+  const resolveAuthor = async (c: Context<AppEnv>, deviceId: string): Promise<number | null> => {
+    const fromSession = c.get('authorId')
+    if (fromSession != null) return fromSession
+    return deviceId ? findAuthorByDevice(deviceId) : null
+  }
 
-  /** 요청의 deviceId. 없으면 null 을 돌려주고 호출부가 400 을 낸다. */
+  /**
+   * 신원을 밝힌 요청인가. 세션이 있으면 deviceId 가 없어도 된다 —
+   * 로그인한 앱이 deviceId 를 그만 보내도 동작하게 하려는 것이다(구버전은 계속 보낸다).
+   */
+  const hasIdentity = (c: Context<AppEnv>, deviceId: string): boolean =>
+    c.get('authorId') != null || deviceId !== ''
+
+  /** 요청의 deviceId. 세션이 없는 요청에서는 이것이 유일한 신원이다. */
   function deviceIdOf(c: { req: { query: (k: string) => string | undefined } }): string {
     return (c.req.query('deviceId') ?? '').trim();
   }
@@ -1037,9 +1062,9 @@ export function buildApp(): Hono {
   //  본문(days)은 싣지 않되, 카드가 그릴 만큼의 요약(`daySummaries`)은 함께 내려보낸다.
   v1.get('/plans', async (c) => {
     const deviceId = deviceIdOf(c);
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
 
-    const authorId = await findAuthor(deviceId);
+    const authorId = await resolveAuthor(c, deviceId);
     if (authorId == null) return c.json({ count: 0, items: [] });
 
     const rows = (await query<Record<string, unknown>>(
@@ -1059,8 +1084,8 @@ export function buildApp(): Hono {
   // 플랜 상세 — days/items 포함
   v1.get('/plans/:planId', async (c) => {
     const deviceId = deviceIdOf(c);
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
-    const authorId = await findAuthor(deviceId);
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400);
+    const authorId = await resolveAuthor(c, deviceId);
 
     const plan = (await query<Record<string, unknown>>(
       `${PLAN_SELECT} where p.id = $1 and p.author_id = $2`,
@@ -1131,7 +1156,7 @@ export function buildApp(): Hono {
     const startDate = str(p.startDate)
     const endDate = str(p.endDate)
 
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
     if (!title) return c.json({ error: 'missing_title', message: '플랜 제목은 비어 있을 수 없습니다.' }, 400)
     if (title.length > MAX_PLAN_TITLE) {
       return c.json({ error: 'invalid_title', message: `제목은 ${MAX_PLAN_TITLE}자 이하여야 합니다.` }, 400)
@@ -1184,7 +1209,7 @@ export function buildApp(): Hono {
     }
 
     // 처음 저장하는 기기라면 닉네임이 필요하다(authors.nickname 은 not null).
-    const knownId = await findAuthor(deviceId)
+    const knownId = await resolveAuthor(c, deviceId)
     if (await needsNickname(knownId) && !authorNm) {
       return c.json({ error: 'missing_authorNm', message: '처음 저장하는 기기입니다. authorNm 을 함께 보내주세요.' }, 400)
     }
@@ -1202,7 +1227,7 @@ export function buildApp(): Hono {
                returning id`, [deviceId, authorNm],
             )).rows[0]
         if (!author) throw new Error('author_upsert_failed')
-        await bindDevice(client, deviceId, author.id)
+        if (deviceId) await bindDevice(client, deviceId, author.id)
 
         // 남의 플랜을 덮어쓰지 못하게 소유자까지 조건에 넣는다. 이미 있는데 주인이 다르면
         // 아래 upsert 가 0행을 갱신하고, 그 사실을 rowCount 로 잡아 403 을 낸다.
@@ -1304,9 +1329,9 @@ export function buildApp(): Hono {
   //     전부 조건이 붙어 실수할 여지가 늘기 때문이다.
   v1.delete('/plans/:planId', async (c) => {
     const deviceId = deviceIdOf(c)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
 
-    const authorId = await findAuthor(deviceId)
+    const authorId = await resolveAuthor(c, deviceId)
     // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 조회와 같은 규칙이다.
     if (authorId == null) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
 
@@ -1333,11 +1358,12 @@ export function buildApp(): Hono {
     | { ok: false; error: 'missing_deviceId' | 'not_found' }
 
   const applyConfirm = async (
-    deviceId: string, planId: string, confirmed: boolean,
+    c: Context<AppEnv>, planId: string, confirmed: boolean,
   ): Promise<ConfirmResult> => {
-    if (!deviceId) return { ok: false, error: 'missing_deviceId' }
+    const deviceId = deviceIdOf(c)
+    if (!hasIdentity(c, deviceId)) return { ok: false, error: 'missing_deviceId' }
 
-    const authorId = await findAuthor(deviceId)
+    const authorId = await resolveAuthor(c, deviceId)
     // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 조회·삭제와 같은 규칙이다.
     if (authorId == null) return { ok: false, error: 'not_found' }
 
@@ -1363,7 +1389,7 @@ export function buildApp(): Hono {
   } as const
 
   const respondConfirm = async (c: Context, confirmed: boolean) => {
-    const r = await applyConfirm(deviceIdOf(c), c.req.param('planId') ?? '', confirmed)
+    const r = await applyConfirm(c, c.req.param('planId') ?? '', confirmed)
     if (r.ok) return c.json(r.plan)
     return c.json(
       { error: r.error, message: confirmMessages[r.error] },
@@ -1390,15 +1416,30 @@ export function buildApp(): Hono {
     return !row?.nickname?.trim()
   }
 
-  /** 저장·좋아요처럼 **이름이 필요 없는** 행동을 위한 계정 확보. 없으면 빈 닉네임으로 만든다. */
-  const ensureAnonymousAuthor = async (deviceId: string): Promise<number> => {
-    const known = await findAuthor(deviceId)
-    if (known != null) return known
-    return (await query<{ id: number }>(
-      `insert into authors (device_id, nickname) values ($1, '')
-       on conflict (device_id) do update set device_id = excluded.device_id
-       returning id`, [deviceId],
-    )).rows[0]!.id
+  /**
+   * 저장·좋아요처럼 **이름이 필요 없는** 행동을 위한 계정 확보. 없으면 빈 닉네임으로 만든다.
+   *
+   * ⚠️ 예전에는 authors.device_id 에만 쓰고 bindDevice 를 부르지 않아 author_devices 에
+   *    행이 생기지 않았다. findAuthorByDevice 의 레거시 폴백이 가려 주고 있었을 뿐이라,
+   *    authors.device_id 를 드롭하는 순간 "저장만 해 본 기기"가 계정을 잃는다.
+   *    다른 쓰기 경로와 똑같이 바인딩까지 남긴다.
+   */
+  const ensureAnonymousAuthor = async (c: Context<AppEnv>, deviceId: string): Promise<number> => {
+    const known = await resolveAuthor(c, deviceId)
+    if (known != null) {
+      // 로그인 계정이든 기존 익명이든 이 기기를 그 계정에 묶어 둔다(last_seen_at 갱신 포함).
+      if (deviceId) await withTransaction((client) => bindDevice(client, deviceId, known))
+      return known
+    }
+    return withTransaction(async (client) => {
+      const id = (await client.query<{ id: number }>(
+        `insert into authors (device_id, nickname) values ($1, '')
+         on conflict (device_id) do update set device_id = excluded.device_id
+         returning id`, [deviceId],
+      )).rows[0]!.id
+      await bindDevice(client, deviceId, id)
+      return id
+    })
   }
 
   /**
@@ -1410,9 +1451,9 @@ export function buildApp(): Hono {
    */
   v1.get('/saved-places', async (c) => {
     const deviceId = deviceIdOf(c)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
 
-    const authorId = await findAuthor(deviceId)
+    const authorId = await resolveAuthor(c, deviceId)
     if (authorId == null) return c.json({ count: 0, items: [] })
 
     const rows = (await query(
@@ -1434,13 +1475,13 @@ export function buildApp(): Hono {
   /** 저장. 이미 저장돼 있어도 성공으로 둔다 — 두 번 눌렀다고 실패를 보여 줄 이유가 없다. */
   v1.put('/saved-places/:contentId', async (c) => {
     const deviceId = deviceIdOf(c)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
 
     const contentId = c.req.param('contentId') ?? ''
     const exists = (await query('select 1 from barrier_free where contentid = $1', [contentId])).rowCount
     if (!exists) return c.json({ error: 'not_found', message: '장소를 찾을 수 없습니다.' }, 404)
 
-    const authorId = await ensureAnonymousAuthor(deviceId)
+    const authorId = await ensureAnonymousAuthor(c, deviceId)
     await query(
       `insert into saved_places (author_id, content_id) values ($1, $2)
        on conflict (author_id, content_id) do nothing`, [authorId, contentId],
@@ -1450,9 +1491,9 @@ export function buildApp(): Hono {
 
   v1.delete('/saved-places/:contentId', async (c) => {
     const deviceId = deviceIdOf(c)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
 
-    const authorId = await findAuthor(deviceId)
+    const authorId = await resolveAuthor(c, deviceId)
     const contentId = c.req.param('contentId') ?? ''
     // 저장한 적 없는 장소를 지워도 성공이다 — 결과("저장돼 있지 않다")가 같다.
     if (authorId != null) {
@@ -1528,7 +1569,8 @@ export function buildApp(): Hono {
     const liked = c.req.query('liked') === 'true'
 
     // 보는 사람. 로그인이 없으니 기기가 곧 사람이고, 없으면 null(아무것도 안 누른 상태).
-    const viewerId = deviceId ? await findAuthor(deviceId) : null
+    // deviceId 로 가드하지 않는다 — 세션만 보낸(로그인) 요청에서 보는 사람을 놓친다.
+    const viewerId = await resolveAuthor(c, deviceId)
 
     const conditions: string[] = []
     const params: unknown[] = [viewerId]
@@ -1566,7 +1608,8 @@ export function buildApp(): Hono {
   v1.get('/posts/:postId', async (c) => {
     const postId = c.req.param('postId') ?? ''
     const deviceId = deviceIdOf(c)
-    const viewerId = deviceId ? await findAuthor(deviceId) : null
+    // deviceId 로 가드하지 않는다 — 세션만 보낸(로그인) 요청에서 보는 사람을 놓친다.
+    const viewerId = await resolveAuthor(c, deviceId)
     const post = (await query<Record<string, unknown>>(
       `${postSelect(2)} where p.id = $1`, [postId, viewerId],
     )).rows[0]
@@ -1596,7 +1639,7 @@ export function buildApp(): Hono {
     const deviceId = str(p.deviceId)
     const authorNm = str(p.authorNm)
     const body = str(p.body)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
     if (!body) return c.json({ error: 'missing_body', message: '내용은 비어 있을 수 없습니다.' }, 400)
     if (body.length > MAX_POST_BODY) {
       return c.json({ error: 'body_too_long', message: `내용은 ${MAX_POST_BODY}자 이하여야 합니다.` }, 400)
@@ -1625,7 +1668,7 @@ export function buildApp(): Hono {
       return c.json({ error: 'invalid_place', message: '장소는 contentID 와 name 이 필요합니다.' }, 400)
     }
 
-    const knownId = await findAuthor(deviceId)
+    const knownId = await resolveAuthor(c, deviceId)
     if (await needsNickname(knownId) && !authorNm) {
       return c.json({
         error: 'missing_authorNm',
@@ -1644,7 +1687,7 @@ export function buildApp(): Hono {
             `insert into authors (device_id, nickname) values ($1, $2) returning id`,
             [deviceId, authorNm],
           )).rows[0]!
-      await bindDevice(client, deviceId, author.id)
+      if (deviceId) await bindDevice(client, deviceId, author.id)
 
       const created = (await client.query<{ id: string }>(
         `insert into posts (author_id, body, image_urls, access_features)
@@ -1670,8 +1713,8 @@ export function buildApp(): Hono {
 
   v1.delete('/posts/:postId', async (c) => {
     const deviceId = deviceIdOf(c)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
-    const authorId = await findAuthor(deviceId)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    const authorId = await resolveAuthor(c, deviceId)
     if (authorId == null) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
 
     const result = await query('delete from posts where id = $1 and author_id = $2',
@@ -1690,19 +1733,19 @@ export function buildApp(): Hono {
    */
   const setPostLike = async (c: Context, liked: boolean) => {
     const deviceId = deviceIdOf(c)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
 
     const postId = c.req.param('postId') ?? ''
     const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
     if (!exists) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
 
     if (liked) {
-      const authorId = await ensureAnonymousAuthor(deviceId)
+      const authorId = await ensureAnonymousAuthor(c, deviceId)
       await query(
         `insert into post_likes (post_id, author_id) values ($1, $2)
          on conflict (post_id, author_id) do nothing`, [postId, authorId])
     } else {
-      const authorId = await findAuthor(deviceId)
+      const authorId = await resolveAuthor(c, deviceId)
       if (authorId != null) {
         await query('delete from post_likes where post_id = $1 and author_id = $2', [postId, authorId])
       }
@@ -1754,7 +1797,7 @@ export function buildApp(): Hono {
     const deviceId = str(p.deviceId)
     const authorNm = str(p.authorNm)
     const body = str(p.body)
-    if (!deviceId) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
+    if (!hasIdentity(c, deviceId)) return c.json({ error: 'missing_deviceId', message: 'deviceId 는 필수입니다.' }, 400)
     if (!body) return c.json({ error: 'missing_body', message: '댓글은 비어 있을 수 없습니다.' }, 400)
     if (body.length > 1000) {
       return c.json({ error: 'body_too_long', message: '댓글은 1000자 이하여야 합니다.' }, 400)
@@ -1764,7 +1807,7 @@ export function buildApp(): Hono {
     const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
     if (!exists) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
 
-    const knownId = await findAuthor(deviceId)
+    const knownId = await resolveAuthor(c, deviceId)
     if (await needsNickname(knownId) && !authorNm) {
       return c.json({
         error: 'missing_authorNm',
@@ -1782,7 +1825,7 @@ export function buildApp(): Hono {
             `insert into authors (device_id, nickname) values ($1, $2) returning id`,
             [deviceId, authorNm],
           )).rows[0]!
-      await bindDevice(client, deviceId, author.id)
+      if (deviceId) await bindDevice(client, deviceId, author.id)
       return (await client.query<{ id: string }>(
         'insert into post_comments (post_id, author_id, body) values ($1, $2, $3) returning id',
         [postId, author.id, body],
