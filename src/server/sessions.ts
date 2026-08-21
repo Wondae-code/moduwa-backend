@@ -48,40 +48,59 @@ export async function issueSession(
  */
 export async function resolveSession(
   token: string,
-): Promise<{ authorId: number; sessionId: string } | null> {
+): Promise<{ authorId: number; sessionId: string; deviceId: string | null } | null> {
   if (!token) return null;
-  const row = (await query<{ author_id: number; id: string }>(
+  const row = (await query<{ author_id: number; id: string; device_id: string | null }>(
     `update author_sessions
         set last_used_at = now(),
             expires_at   = now() + make_interval(days => $2)
       where token_hash = $1
         and revoked_at is null
         and expires_at > now()
-      returning author_id, id`,
-    [hashToken(token), config.auth.sessionDays],
+        -- 절대 만료. 슬라이딩만 두면 90일에 한 번 아무 요청이나 보내는 것으로 세션이
+        -- 영구히 산다 — 유출된 토큰이 무기한 유효해진다는 뜻이다. 생성 시각 기준 상한을 둔다.
+        and created_at > now() - make_interval(days => $3)
+      returning author_id, id, device_id`,
+    [hashToken(token), config.auth.sessionDays, config.auth.sessionMaxDays],
   )).rows[0];
-  return row ? { authorId: row.author_id, sessionId: row.id } : null;
-}
-
-/** 이 토큰 하나만 끊는다(= 이 기기 로그아웃). 이미 없거나 폐기됐어도 조용히 지나간다. */
-export async function revokeSession(token: string): Promise<void> {
-  if (!token) return;
-  await query(
-    'update author_sessions set revoked_at = now() where token_hash = $1 and revoked_at is null',
-    [hashToken(token)],
-  );
+  return row
+    ? { authorId: row.author_id, sessionId: row.id, deviceId: row.device_id }
+    : null;
 }
 
 /**
- * 이 기기에서 난 세션을 전부 끊는다.
+ * 이 토큰 하나만 끊는다(= 이 기기 로그아웃). 이미 없거나 폐기됐어도 조용히 지나간다.
+ *
+ * 폐기한 세션의 author/기기를 돌려준다. 로그아웃 뒷정리(기기 바인딩 해제)가 **클라이언트가
+ * 보낸 deviceId 가 아니라 이 값**을 써야 하기 때문이다 — 본문 값을 믿으면 아무 세션 하나로
+ * 남의 기기를 끊을 수 있다.
+ */
+export async function revokeSession(
+  token: string,
+): Promise<{ authorId: number; deviceId: string | null } | null> {
+  if (!token) return null;
+  const row = (await query<{ author_id: number; device_id: string | null }>(
+    `update author_sessions set revoked_at = now()
+      where token_hash = $1 and revoked_at is null
+      returning author_id, device_id`,
+    [hashToken(token)],
+  )).rows[0];
+  return row ? { authorId: row.author_id, deviceId: row.device_id } : null;
+}
+
+/**
+ * 이 기기에서 **내 계정으로** 난 세션을 전부 끊는다.
  * 로그아웃은 토큰 폐기 + 기기 바인딩 해제(accounts.signOutDevice)가 짝이다. 토큰만 끊고
  * 바인딩을 두면 그 기기의 다음 익명 요청이 여전히 계정으로 해석된다.
  */
-export async function revokeDeviceSessions(deviceId: string): Promise<void> {
+export async function revokeDeviceSessions(deviceId: string, authorId: number): Promise<void> {
   if (!deviceId) return;
+  // ⚠️ author_id 조건이 보안 경계다. 이것 없이 deviceId 만으로 폐기하면 유효한 세션 하나를
+  //    가진 사람이 남의 기기를 상시 강제 로그아웃 상태로 묶어 둘 수 있다.
   await query(
-    'update author_sessions set revoked_at = now() where device_id = $1 and revoked_at is null',
-    [deviceId],
+    `update author_sessions set revoked_at = now()
+      where device_id = $1 and author_id = $2 and revoked_at is null`,
+    [deviceId, authorId],
   );
 }
 

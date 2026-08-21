@@ -77,6 +77,9 @@ export async function findAuthorByDevice(deviceId: string): Promise<number | nul
  * 호출부의 **트랜잭션 안에서** 부르도록 client 를 받는다. 후기 작성·플랜 저장은 이미
  * 자기 트랜잭션에서 author 를 만들고 본문을 쓰는데, 여기서 별도 트랜잭션을 열면
  * 본문 저장이 실패해도 바인딩만 남아 둘이 어긋난다.
+ *
+ * ⚠️ 이 함수는 **기기의 소유자를 바꾸지 않는다.** 이미 다른 계정에 묶인 기기면 아무 일도
+ *    일어나지 않는다(touchDevice 주석 참고). 소유자 변경은 signIn 만 할 수 있다.
  */
 export async function bindDevice(
   client: pg.PoolClient,
@@ -168,7 +171,8 @@ export async function signIn(params: {
     if (nickname) {
       await client.query('update authors set nickname = $2 where id = $1', [authorId, nickname]);
     }
-    if (deviceId) await touchDevice(client, deviceId, authorId);
+    // 로그인은 기기의 소유자가 바뀌는 유일한 지점이다 — 여기서만 rebind 를 허용한다.
+    if (deviceId) await touchDevice(client, deviceId, authorId, true);
 
     const row = (await client.query<{ uuid: string; nickname: string; email: string | null; verified: Date | null }>(
       'select uuid, nickname, email, email_verified_at as verified from authors where id = $1', [authorId],
@@ -184,11 +188,21 @@ export async function signIn(params: {
  * 로그아웃 — 기기 바인딩만 끊는다. 계정과 그 데이터는 그대로 남고, 다시 로그인하면 돌아온다.
  * authors.device_id 까지 비우는 것이 중요하다. 남겨 두면 구버전 폴백 경로가 방금 끊은
  * 바인딩을 되살려, 로그아웃한 기기에 계정 데이터가 다시 보인다.
+ *
+ * ⚠️ authorId 를 **반드시** 받는다. 이것 없이 deviceId 만으로 지우면, 유효한 세션 하나를 가진
+ *    사람이 남의 deviceId 를 넘겨 그 기기의 바인딩을 삭제할 수 있다. 피해자가 익명이었다면
+ *    기기와 계정을 잇는 유일한 연결이 사라져 그동안 쓴 것 전부에 도달할 수 없게 된다.
  */
-export async function signOutDevice(deviceId: string): Promise<void> {
+export async function signOutDevice(deviceId: string, authorId: number): Promise<void> {
   await withTransaction(async (client) => {
-    await client.query('delete from author_devices where device_id = $1', [deviceId]);
-    await client.query('update authors set device_id = null where device_id = $1', [deviceId]);
+    await client.query(
+      'delete from author_devices where device_id = $1 and author_id = $2',
+      [deviceId, authorId],
+    );
+    await client.query(
+      'update authors set device_id = null where device_id = $1 and id = $2',
+      [deviceId, authorId],
+    );
   });
 }
 
@@ -204,11 +218,32 @@ async function findBoundAuthor(client: pg.PoolClient, deviceId: string): Promise
   return row?.author_id ?? null;
 }
 
-async function touchDevice(client: pg.PoolClient, deviceId: string, authorId: number): Promise<void> {
+/**
+ * 기기 바인딩 upsert.
+ *
+ * ⚠️ `rebind` 가 이 함수의 보안 경계다.
+ *  세션이 생긴 뒤로는 "요청이 지목한 기기"와 "요청의 주인"이 서로 다른 출처에서 온다.
+ *  그래서 조건 없이 author_id 를 덮어쓰면, 유효한 세션 하나만 가진 사람이 아무 쓰기 요청에
+ *  남의 deviceId 를 실어 **그 기기를 자기 계정으로 가져올 수 있다.**
+ *  (그 뒤 피해자의 무토큰 요청은 공격자 계정으로 해석되고, 피해자가 새로 쓰는 글도 그쪽에 쌓인다)
+ *
+ *  그래서 기기의 소유자를 바꾸는 것은 **로그인 경로에서만**(rebind=true) 허용한다.
+ *  일반 쓰기 경로(rebind=false)는 이미 자기 기기일 때 last_seen_at 만 갱신하고,
+ *  남의 기기면 아무 일도 하지 않는다(조용히 무시 — 에러를 내면 그것 자체가 "이 기기는 남의
+ *  것"이라는 정보를 주고, 정상 사용자에게는 아무 의미 없는 실패가 된다).
+ */
+async function touchDevice(
+  client: pg.PoolClient,
+  deviceId: string,
+  authorId: number,
+  rebind = false,
+): Promise<void> {
   await client.query(
     `insert into author_devices (device_id, author_id) values ($1, $2)
-       on conflict (device_id) do update set author_id = excluded.author_id, last_seen_at = now()`,
-    [deviceId, authorId],
+       on conflict (device_id) do update
+          set author_id = excluded.author_id, last_seen_at = now()
+        where $3::boolean or author_devices.author_id = excluded.author_id`,
+    [deviceId, authorId, rebind],
   );
 }
 

@@ -18,12 +18,13 @@ import {
   signOutDevice,
 } from './accounts';
 import {
+  MAX_PASSWORD_LENGTH,
   burnVerifyTime,
   hashPassword,
   passwordPolicyError,
   verifyPassword,
 } from './password';
-import type { AppEnv } from './middleware';
+import { type AppEnv, clientIp } from './middleware';
 import { issueSession, revokeDeviceSessions, revokeSession } from './sessions';
 
 // 이메일 형식 — 완벽한 RFC 검증은 불가능하고 실익도 없다. 명백한 오타만 걸러내고
@@ -31,6 +32,7 @@ import { issueSession, revokeDeviceSessions, revokeSession } from './sessions';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 254; // RFC 5321 의 주소 상한
 const MAX_NICKNAME_LENGTH = 40; // authors.nickname — 다른 라우트와 같은 상한
+const MAX_DEVICE_ID_LENGTH = 128; // app.ts 의 다른 쓰기 라우트와 같은 상한
 
 /**
  * 로그인 실패 응답. **이유를 나누지 않는다.**
@@ -49,11 +51,14 @@ function invalidCredentials(c: Context<AppEnv>) {
 //  아니라 실용적으로 무의미하게 만드는 용도.
 //  ⚠️ IP 기준이라 같은 회사·학교에서 여러 명이 쓰면 함께 걸릴 수 있다. 창이 10분이라
 //     실사용에 문제되지 않는 선이고, 계정별로 잠그면 남의 계정을 잠글 수 있어 더 나쁘다.
+//  IP 는 clientIp() 로 얻는다 — XFF 첫 항목을 쓰면 헤더 한 줄로 제한이 우회된다.
 const attempts = new Map<string, { count: number; resetAt: number }>();
 const WINDOW_MS = 10 * 60_000;
 
 function clientId(c: Context<AppEnv>): string {
-  return c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon';
+  // ⚠️ XFF 의 첫 항목을 쓰면 안 된다 — 클라이언트가 바꿀 수 있어 제한이 무의미해진다.
+  //    신뢰 홉 수를 반영한 clientIp() 를 쓴다(middleware.ts).
+  return clientIp(c);
 }
 
 function tooManyAttempts(c: Context<AppEnv>): boolean {
@@ -61,7 +66,8 @@ function tooManyAttempts(c: Context<AppEnv>): boolean {
   return !!cur && Date.now() < cur.resetAt && cur.count >= config.auth.maxLoginAttempts;
 }
 
-function recordFailure(c: Context<AppEnv>): void {
+/** 시도 1건 기록. 로그인은 실패만, 가입은 성공까지 센다(아래 주석 참고). */
+function recordAttempt(c: Context<AppEnv>): void {
   const id = clientId(c);
   const now = Date.now();
   const cur = attempts.get(id);
@@ -117,6 +123,14 @@ export function buildAuthRoutes(): Hono<AppEnv> {
   //  가입 시점에 이 기기의 익명 데이터를 계정으로 가져온다(signIn 의 ①·③ 경로).
   //  그래서 deviceId 를 함께 받는다 — 없으면 익명으로 쓴 후기·플랜이 그대로 버려진다.
   auth.post('/email/sign-up', async (c) => {
+    // 가입도 제한한다. 409/201 이 갈리므로 이 경로는 그 자체로 이메일 열거 수단이고,
+    // 계정을 실제로 만들 수 있어 대량 가입에도 쓰인다.
+    if (tooManyAttempts(c)) {
+      return c.json({ error: 'too_many_attempts', message: '요청이 많습니다. 잠시 후 다시 시도해주세요.' }, 429);
+    }
+    // 로그인과 달리 **성공도 센다.** 실패만 세면 매번 새 이메일로 찍는 열거·대량 가입이
+    // 카운터를 전혀 올리지 않아 제한이 걸리지 않는다(409 만 세면 그 경로만 막힌다).
+    recordAttempt(c);
     const p = await readBody(c);
     if (!p) return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
 
@@ -133,9 +147,12 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     if (nickname.length > MAX_NICKNAME_LENGTH) {
       return c.json({ error: 'invalid_nickname', message: `닉네임은 ${MAX_NICKNAME_LENGTH}자 이하여야 합니다.` }, 400);
     }
+    if (deviceId.length > MAX_DEVICE_ID_LENGTH) {
+      return c.json({ error: 'invalid_deviceId', message: `deviceId 는 ${MAX_DEVICE_ID_LENGTH}자 이하여야 합니다.` }, 400);
+    }
 
     // 가입은 "이미 있는 이메일"을 알려줘야 한다 — 안 알려주면 사용자가 가입을 못 한다.
-    //  (로그인과 달리 여기서는 열거를 감수한다. 대신 시도 제한이 걸려 있다)
+    //  열거를 감수하는 대신 위의 시도 제한으로 속도를 묶는다(중복 응답도 실패로 센다).
     if (await findEmailIdentity(email)) {
       return c.json({ error: 'email_taken', message: '이미 가입된 이메일입니다. 로그인해주세요.' }, 409);
     }
@@ -162,7 +179,16 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const email = normalizeEmail(str(p.email));
     const password = typeof p.password === 'string' ? p.password : '';
     const deviceId = str(p.deviceId);
+    // 길이 상한을 여기서도 본다. 없으면 수 MB 짜리 password 로 scrypt(요청당 32MB·수십 ms)를
+    // 반복 유발해 libuv 스레드풀을 점유할 수 있다 — 사진 업로드까지 같이 밀린다.
     if (!email || !password) return invalidCredentials(c);
+    if (email.length > MAX_EMAIL_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+      recordAttempt(c);
+      return invalidCredentials(c);
+    }
+    if (deviceId.length > MAX_DEVICE_ID_LENGTH) {
+      return c.json({ error: 'invalid_deviceId', message: `deviceId 는 ${MAX_DEVICE_ID_LENGTH}자 이하여야 합니다.` }, 400);
+    }
 
     const identity = await findEmailIdentity(email);
     // 계정이 없거나 비밀번호가 없는 신원(소셜로만 가입)이어도 같은 시간을 쓰고 같은 답을 준다.
@@ -170,7 +196,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       ? await verifyPassword(password, identity.passwordHash)
       : await burnVerifyTime(password);
     if (!ok) {
-      recordFailure(c);
+      recordAttempt(c);
       return invalidCredentials(c);
     }
 
@@ -189,13 +215,16 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const token = c.get('sessionToken');
     if (!token) return c.json({ error: 'unauthenticated', message: '로그인 상태가 아닙니다.' }, 401);
 
-    const p = await readBody(c);
-    const deviceId = str(p?.deviceId);
-
-    await revokeSession(token);
-    if (deviceId) {
-      await revokeDeviceSessions(deviceId);
-      await signOutDevice(deviceId);
+    // ⚠️ **본문의 deviceId 를 쓰지 않는다.** 예전에는 그 값을 그대로 믿어서, 유효한 세션 하나만
+    //    있으면 남의 deviceId 를 넘겨 그 기기의 세션을 전부 폐기하고 바인딩까지 삭제할 수 있었다
+    //    (피해자가 익명이면 그동안 쓴 것 전부에 도달할 수 없게 된다).
+    //    끊을 기기는 **폐기한 세션 행에 기록된 것**뿐이고, 범위도 그 세션의 계정으로 좁힌다.
+    const revoked = await revokeSession(token);
+    // 세션 행에 device_id 가 없던 경우(기기를 못 알아낸 로그인)는 미들웨어가 넣어 준 값을 쓴다.
+    const deviceId = revoked?.deviceId ?? c.get('sessionDeviceId') ?? '';
+    if (revoked && deviceId) {
+      await revokeDeviceSessions(deviceId, revoked.authorId);
+      await signOutDevice(deviceId, revoked.authorId);
     }
     return c.json({ ok: true });
   });

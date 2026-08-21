@@ -79,8 +79,17 @@ export const config = {
     // 세션 유효기간(일). 슬라이딩 만료라 계속 쓰는 기기는 튕기지 않고,
     // 이 기간 동안 한 번도 안 쓴 기기만 다시 로그인하게 된다.
     sessionDays: num('SESSION_DAYS', 90),
+    // 절대 만료(일). 슬라이딩만 두면 주기적으로 요청 하나만 보내도 세션이 영구히 살아,
+    // 유출된 토큰이 무기한 유효해진다. 생성 시각 기준 상한을 둔다.
+    sessionMaxDays: num('SESSION_MAX_DAYS', 180),
     // 같은 IP 에서의 로그인·가입 시도 상한(10분 창). 무차별 대입을 실용적으로 무의미하게 만든다.
     maxLoginAttempts: num('MAX_LOGIN_ATTEMPTS', 10),
+    // 신뢰하는 프록시 홉 수. 클라이언트의 실제 IP 를 X-Forwarded-For 의 **오른쪽에서**
+    // 이만큼 세어 얻는다.
+    //  ⚠️ 왼쪽(첫 항목)을 쓰면 안 된다 — 그 값은 클라이언트가 넣은 것이고 프록시는 실제 IP 를
+    //     뒤에 덧붙인다. 왼쪽을 쓰면 헤더를 매 요청 바꿔 시도 제한을 무한히 우회할 수 있다.
+    //  Railway 는 자기 edge 가 마지막에 붙이므로 1 이 맞다. 프록시가 늘면 함께 올릴 것.
+    trustedProxyHops: num('TRUSTED_PROXY_HOPS', 1),
   },
 
   // ── 수집 현황 대시보드(/dashboard) ──
