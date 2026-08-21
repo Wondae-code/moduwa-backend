@@ -33,6 +33,9 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 254; // RFC 5321 의 주소 상한
 const MAX_NICKNAME_LENGTH = 40; // authors.nickname — 다른 라우트와 같은 상한
 const MAX_DEVICE_ID_LENGTH = 128; // app.ts 의 다른 쓰기 라우트와 같은 상한
+// 무장애 항목 개수 상한. 앱이 항목을 늘려도 서버 배포 없이 따라가야 하므로 값은 검증하지
+//  않지만(030 주석), 개수는 막는다 — 검증하지 않는 배열에 상한이 없으면 그대로 저장소가 된다.
+const MAX_ACCESS_FEATURES = 32;
 
 /**
  * 로그인 실패 응답. **이유를 나누지 않는다.**
@@ -83,10 +86,21 @@ setInterval(() => {
 // ── 응답 모양 ────────────────────────────────────────────────────────────────
 //  ⚠️ deviceId 는 어떤 응답에도 넣지 않는다(017 이후의 규칙). authors.id 도 마찬가지로
 //     내보내지 않는다 — 외부에는 uuid 만 노출한다.
-type AuthorView = { uuid: string; nickname: string; email: string | null; emailVerified: boolean };
+type AuthorView = {
+  uuid: string;
+  nickname: string;
+  email: string | null;
+  emailVerified: boolean;
+  /** 온보딩에서 고른 무장애 항목(030). 앱이 로컬 값과 맞추는 데 쓴다. */
+  accessFeatures: string[];
+  onboarded: boolean;
+};
 
 function viewOf(r: SignInResult): AuthorView {
-  return { uuid: r.uuid, nickname: r.nickname, email: r.email, emailVerified: r.emailVerified };
+  return {
+    uuid: r.uuid, nickname: r.nickname, email: r.email, emailVerified: r.emailVerified,
+    accessFeatures: r.accessFeatures, onboarded: r.onboarded,
+  };
 }
 
 /** 로그인·가입의 공통 마무리 — 병합은 signIn 이 이미 했고, 여기서는 세션만 낸다. */
@@ -96,8 +110,7 @@ async function finishSignIn(result: SignInResult, deviceId: string) {
     token: session.token,
     expiresAt: session.expiresAt,
     author: viewOf(result),
-    // 앱이 "기존에 작성하신 내용을 가져왔습니다" 안내를 띄울지 판단하는 값.
-    merged: result.merged,
+    // 가입인지 로그인인지. 앱이 온보딩 완료 처리·환영 화면 분기에 쓴다.
     created: result.created,
   };
 }
@@ -138,6 +151,14 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const password = typeof p.password === 'string' ? p.password : '';
     const nickname = str(p.nickname);
     const deviceId = str(p.deviceId);
+    // 온보딩에서 고른 무장애 항목. 앱 로컬에 있던 값이 여기 실려 온다.
+    //  키가 아예 없으면 undefined 로 둔다 — "온보딩을 안 했다"와 "아무것도 고르지 않았다"를
+    //  구분해야 하고, signIn 이 그 차이로 onboarded_at 을 찍을지 결정한다.
+    const accessFeatures = p.accessFeatures === undefined
+      ? undefined
+      : (Array.isArray(p.accessFeatures)
+          ? p.accessFeatures.filter((v): v is string => typeof v === 'string' && v.length <= 40).slice(0, MAX_ACCESS_FEATURES)
+          : []);
 
     if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
       return c.json({ error: 'invalid_email', message: '이메일 형식이 올바르지 않습니다.' }, 400);
@@ -163,6 +184,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       deviceId,
       nickname,
       passwordHash,
+      accessFeatures,
     });
     return c.json(await finishSignIn(result, deviceId), 201);
   });
@@ -236,8 +258,12 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const authorId = c.get('authorId');
     if (authorId == null) return c.json({ error: 'unauthenticated', message: '로그인 상태가 아닙니다.' }, 401);
 
-    const row = (await query<{ uuid: string; nickname: string; email: string | null; verified: Date | null }>(
-      'select uuid, nickname, email, email_verified_at as verified from authors where id = $1',
+    const row = (await query<{
+      uuid: string; nickname: string; email: string | null; verified: Date | null;
+      access_features: string[]; onboarded_at: Date | null;
+    }>(
+      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at
+         from authors where id = $1`,
       [authorId],
     )).rows[0];
     if (!row) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
@@ -247,6 +273,8 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       nickname: row.nickname,
       email: row.email,
       emailVerified: row.verified != null,
+      accessFeatures: row.access_features,
+      onboarded: row.onboarded_at != null,
     } satisfies AuthorView);
   });
 

@@ -4,14 +4,20 @@
 // 검증이 끝난 신원(VerifiedIdentity)만 받는다. 그래서 관리형 서비스(Supabase 등)를 쓰든
 // 직접 JWKS 검증을 하든 아래 규칙은 그대로다 — 프로바이더 선택과 이 파일은 독립이다.
 //
-// 규칙 요약(024_accounts.sql 의 주석과 짝):
-//   · 익명       — device_id → author_devices → authors (계정 정보 없음)
-//   · 로그인     — (provider, subject) 로 계정을 찾고, 이 기기의 익명 데이터를 그 계정으로 병합
-//   · 로그아웃   — 기기 바인딩만 끊는다. 다음 익명 활동은 **새 빈 계정**을 만든다.
+// 규칙 요약(030 이후):
+//   · authors 행은 **로그인 계정에만** 생긴다. 익명 기기가 계정을 만드는 경로는 없다.
+//   · 로그인   — (provider, subject) 로 계정을 찾고, 없으면 만든다. 이 기기를 그 계정에 묶는다.
+//   · 로그아웃 — 기기 바인딩만 끊는다. 계정과 데이터는 남고 다시 로그인하면 돌아온다.
+//
+// ⚠️ **병합(익명 데이터 이관)은 없다.** 024~029 에는 "deviceId 로 익명 계정을 찾아 승격하거나
+//    그 데이터를 계정으로 옮기는" 경로가 있었는데, deviceId 소유를 증명할 방법이 없어서
+//    **남의 deviceId 를 실어 가입하면 그 계정을 가져갈 수 있었다.** 쓰기를 로그인 필수로 바꿔
+//    익명 계정이 아예 생기지 않게 되었으므로, 가져갈 대상과 함께 그 경로를 제거했다.
+//    온보딩 프로필은 앱 로컬에 있다가 가입 요청에 실려 온다(accessFeatures).
 import type pg from 'pg';
 import { query, withTransaction } from '../db';
 
-export type Provider = 'apple' | 'google' | 'kakao' | 'email';
+export type Provider = 'apple' | 'google' | 'kakao' | 'naver' | 'email';
 
 /** 토큰 검증이 **이미 끝난** 신원. 검증되지 않은 값을 여기에 넣으면 안 된다. */
 export type VerifiedIdentity = {
@@ -26,12 +32,13 @@ export type SignInResult = {
   /** 외부에 노출해도 되는 식별자. authors.id(bigserial)는 응답에 넣지 않는다. */
   uuid: string;
   nickname: string;
-  /** 이 기기의 익명 데이터를 기존 계정으로 합쳤는지 — 앱이 "가져왔습니다" 안내에 쓸 수 있다. */
-  merged: boolean;
-  /** 이번 로그인으로 계정이 새로 만들어졌는지(= 가입) */
+  /** 이번 로그인으로 계정이 새로 만들어졌는지(= 가입). 앱이 온보딩 완료 처리에 쓴다. */
   created: boolean;
   email: string | null;
   emailVerified: boolean;
+  /** 온보딩에서 고른 무장애 항목(030). 앱이 로컬 값과 맞추는 데 쓴다. */
+  accessFeatures: string[];
+  onboarded: boolean;
 };
 
 // 새 계정에 닉네임이 없을 때의 값. authors.nickname 이 not null 이라 무언가는 있어야 하고,
@@ -92,14 +99,12 @@ export async function bindDevice(
 /**
  * 검증된 신원으로 로그인/가입하고, 이 기기를 그 계정에 묶는다.
  *
- * 병합 규칙 — "가입했더니 내 플랜이 사라졌다"를 막는 것이 이 함수의 목적이다.
- *   ① 신원이 처음 보는 것이고 이 기기가 익명 계정에 묶여 있다
- *        → 그 익명 계정을 **승격**한다. 데이터 이동이 없으니 가장 안전하다.
- *   ② 신원이 처음 보는 것이고 이 기기에 계정이 없다        → 새 계정을 만든다.
- *   ③ 신원에 계정이 있고 이 기기가 **익명** 계정에 묶여 있다
- *        → 익명 계정의 후기·플랜·댓글을 계정으로 옮기고 익명 행을 지운다.
- *   ④ 신원에 계정이 있고 이 기기가 **다른 계정**(이미 로그인한 적 있는)에 묶여 있다
- *        → 병합하지 않고 바인딩만 옮긴다. 남의 계정 데이터를 흡수하는 건 되돌릴 수 없다.
+ * 하는 일이 단순하다 — (provider, subject) 로 계정을 찾고, 없으면 만든다.
+ * 예전에는 여기서 deviceId 로 익명 계정을 찾아 승격·병합했는데, 그 경로가 곧
+ * "deviceId 를 아는 사람이 그 계정을 가져가는" 구멍이었다(파일 상단 주석 참고).
+ *
+ * 그래서 **deviceId 는 신원 근거가 아니다.** 여기서의 용도는 "이 계정이 지금 이 기기를
+ * 쓴다"는 기록 하나뿐이고, 그 기록으로 남의 데이터에 닿을 수 있는 경로는 없다.
  */
 export async function signIn(params: {
   identity: VerifiedIdentity;
@@ -107,6 +112,12 @@ export async function signIn(params: {
   nickname?: string;
   /** 이메일 가입에서만 쓴다. 신원을 **처음 만들 때만** 반영된다(로그인은 비밀번호를 덮지 않는다). */
   passwordHash?: string | null;
+  /**
+   * 온보딩에서 고른 무장애 항목. 앱 로컬에 있던 값이 가입 요청에 실려 온다.
+   * ⚠️ **가입할 때만** 반영한다 — 로그인 때도 덮으면, 앱을 지웠다 깐 기기로 로그인하는 것만으로
+   *    사용자가 나중에 직접 고친 프로필이 온보딩 기본값으로 되돌아간다.
+   */
+  accessFeatures?: string[];
 }): Promise<SignInResult> {
   const { identity, deviceId } = params;
   const nickname = (params.nickname ?? '').trim();
@@ -117,45 +128,34 @@ export async function signIn(params: {
       [identity.provider, identity.subject],
     )).rows[0];
 
-    const bound = deviceId ? await findBoundAuthor(client, deviceId) : null;
     let authorId: number;
-    let merged = false;
     let created = false;
 
     if (existing) {
       authorId = existing.author_id;
-      if (bound != null && bound !== authorId) {
-        // ③/④ — 익명일 때만 합친다.
-        if (await isAnonymous(client, bound)) {
-          await moveOwnedRows(client, bound, authorId);
-          await client.query('delete from authors where id = $1', [bound]);
-          merged = true;
-        }
-      }
       await client.query(
         `update author_identities set email = coalesce($3, email), updated_at = now()
           where provider = $1 and subject = $2`,
         [identity.provider, identity.subject, identity.email ?? null],
       );
-    } else if (bound != null && await isAnonymous(client, bound)) {
-      authorId = bound; // ① 승격 — 데이터가 제자리에 그대로 남는다.
-      created = true;
     } else {
-      // ② 새 계정. device_id 는 넣지 않는다 — 바인딩은 author_devices 가 맡는다.
+      // 새 계정. authors.device_id 는 채우지 않는다 — 바인딩은 author_devices 가 맡는다.
+      //  onboarded_at 은 accessFeatures 가 실려 왔을 때만 찍는다. 빈 배열만으로는
+      //  "아무것도 고르지 않았다"와 "온보딩을 안 했다"를 구분할 수 없다(030 주석).
       authorId = (await client.query<{ id: number }>(
-        'insert into authors (nickname) values ($1) returning id',
-        [nickname || FALLBACK_NICKNAME],
+        `insert into authors (nickname, access_features, onboarded_at)
+         values ($1, $2, case when $3::boolean then now() else null end)
+         returning id`,
+        [nickname || FALLBACK_NICKNAME, params.accessFeatures ?? [], params.accessFeatures != null],
       )).rows[0]!.id;
       created = true;
-    }
 
-    if (!existing) {
+      // on conflict 를 쓰지 않는다 — 충돌은 "그 사이 같은 신원이 만들어졌다"는 뜻이고,
+      //  그때 author_id 를 덮어쓰면 뒤에 온 요청이 앞 요청의 신원을 가져간다.
+      //  유니크 위반으로 트랜잭션을 되돌리는 것이 맞다(호출부가 재시도하거나 409 를 낸다).
       await client.query(
         `insert into author_identities (author_id, provider, subject, email, password_hash)
-         values ($1, $2, $3, $4, $5)
-         on conflict (provider, subject) do update
-           set author_id = excluded.author_id, email = coalesce(excluded.email, author_identities.email),
-               updated_at = now()`,
+         values ($1, $2, $3, $4, $5)`,
         [authorId, identity.provider, identity.subject, identity.email ?? null, params.passwordHash ?? null],
       );
     }
@@ -174,12 +174,18 @@ export async function signIn(params: {
     // 로그인은 기기의 소유자가 바뀌는 유일한 지점이다 — 여기서만 rebind 를 허용한다.
     if (deviceId) await touchDevice(client, deviceId, authorId, true);
 
-    const row = (await client.query<{ uuid: string; nickname: string; email: string | null; verified: Date | null }>(
-      'select uuid, nickname, email, email_verified_at as verified from authors where id = $1', [authorId],
+    const row = (await client.query<{
+      uuid: string; nickname: string; email: string | null; verified: Date | null;
+      access_features: string[]; onboarded_at: Date | null;
+    }>(
+      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at
+         from authors where id = $1`,
+      [authorId],
     )).rows[0]!;
     return {
-      authorId, uuid: row.uuid, nickname: row.nickname, merged, created,
+      authorId, uuid: row.uuid, nickname: row.nickname, created,
       email: row.email, emailVerified: row.verified != null,
+      accessFeatures: row.access_features, onboarded: row.onboarded_at != null,
     };
   });
 }
@@ -207,17 +213,6 @@ export async function signOutDevice(deviceId: string, authorId: number): Promise
 }
 
 // ── 내부 ─────────────────────────────────────────────────────────────────────
-async function findBoundAuthor(client: pg.PoolClient, deviceId: string): Promise<number | null> {
-  const row = (await client.query<{ author_id: number }>(
-    `select author_id from author_devices where device_id = $1
-      union all
-     select id from authors where device_id = $1
-      limit 1`,
-    [deviceId],
-  )).rows[0];
-  return row?.author_id ?? null;
-}
-
 /**
  * 기기 바인딩 upsert.
  *
@@ -245,53 +240,4 @@ async function touchDevice(
         where $3::boolean or author_devices.author_id = excluded.author_id`,
     [deviceId, authorId, rebind],
   );
-}
-
-/** 계정 정보(소셜 신원)가 하나도 없는 = 익명 author 인가. 병합해도 되는지의 기준이다. */
-async function isAnonymous(client: pg.PoolClient, authorId: number): Promise<boolean> {
-  const row = (await client.query<{ n: number }>(
-    'select count(*)::int n from author_identities where author_id = $1', [authorId],
-  )).rows[0]!;
-  return row.n === 0;
-}
-
-/**
- * 익명 계정이 가진 것을 계정으로 옮긴다.
- *
- * ⚠️ **authors 를 참조하는 테이블을 새로 만들면 반드시 여기에 추가할 것.**
- *    빠뜨리면 호출부가 옮기고 남은 익명 행을 지울 때 on delete cascade 로 **조용히 함께 삭제된다.**
- *    (실제로 025~027 의 저장·게시글·좋아요가 그렇게 빠져 있었다)
- *
- * reviews.author_nm 은 건드리지 않는다 — 작성 시점의 표시 이름 스냅샷이고, 016 이 그 값을
- * 키로 UPDATE 하기 때문에 바꾸면 다른 마이그레이션이 깨진다.
- */
-async function moveOwnedRows(client: pg.PoolClient, from: number, to: number): Promise<void> {
-  // ① author_id 가 유일성 제약에 안 걸리는 테이블 — 그냥 넘긴다.
-  for (const table of ['reviews', 'plans', 'review_comments', 'posts', 'post_comments']) {
-    await client.query(`update ${table} set author_id = $2 where author_id = $1`, [from, to]);
-  }
-
-  // ② author_id 가 PK 의 일부인 테이블 — 같은 대상을 양쪽 계정이 이미 갖고 있으면 PK 가 충돌한다.
-  //    (폰과 태블릿에서 같은 장소를 각각 저장해 둔 경우처럼 실제로 흔하다)
-  //    그대로 update 하면 병합 트랜잭션 전체가 실패하므로, 계정에 없는 것만 옮기고
-  //    이미 갖고 있어 옮길 수 없는 중복은 버린다 — 어차피 결과가 같다(저장했다/눌렀다).
-  await moveUnique(client, 'saved_places', 'content_id', from, to);
-  await moveUnique(client, 'post_likes', 'post_id', from, to);
-}
-
-/** (author_id, key) 가 PK 인 테이블을 옮긴다. 중복은 옮기지 않고 버린다. */
-async function moveUnique(
-  client: pg.PoolClient,
-  table: 'saved_places' | 'post_likes',
-  key: 'content_id' | 'post_id',
-  from: number,
-  to: number,
-): Promise<void> {
-  await client.query(
-    `update ${table} s set author_id = $2
-      where s.author_id = $1
-        and not exists (select 1 from ${table} t where t.author_id = $2 and t.${key} = s.${key})`,
-    [from, to],
-  );
-  await client.query(`delete from ${table} where author_id = $1`, [from]);
 }

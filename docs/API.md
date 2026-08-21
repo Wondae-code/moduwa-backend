@@ -21,12 +21,28 @@ X-Session-Token: <SESSION_TOKEN>
 ```
 `/v1/auth/email/sign-in`·`sign-up` 응답의 `token`을 저장해 두고 씁니다.
 
-- **토큰이 없어도 됩니다.** 로그인하지 않은 사용자는 종전대로 `deviceId`로 식별합니다.
-- **토큰이 있는데 만료·폐기됐으면 401** (`session_expired`). 이때 `deviceId`로 폴백하지 않습니다 —
-  조용히 익명으로 떨어지면 사용자에게는 "내 데이터가 전부 사라졌다"로 보이기 때문입니다.
-  앱은 401을 받으면 토큰을 지우고 로그인 화면으로 보내면 됩니다.
-- 토큰을 보낸 요청에서는 **`deviceId`가 신원으로 쓰이지 않습니다.** 보내도 되고(구버전 호환),
-  안 보내도 됩니다. 보낸 값은 "어느 기기인가"를 기록하는 데만 쓰입니다.
+- **둘러보기는 토큰 없이 됩니다** — 장소 목록·상세·검색, 남의 후기·게시글 읽기.
+- **쓰기와 개인 데이터 조회는 토큰이 필수입니다.** 없으면 **401 `login_required`** 입니다.
+  앱은 이 응답을 받으면 로그인 창을 띄우면 됩니다.
+- **토큰이 있는데 만료·폐기됐으면 401 `session_expired`** 입니다. 두 코드를 구분하세요 —
+  `login_required`는 "아직 로그인 안 함", `session_expired`는 "토큰이 낡음"입니다.
+- 세션은 쓰는 동안 자동 연장되지만(기본 90일), **생성 후 180일이 지나면 만료**됩니다.
+- `sign-in`·`sign-up`은 **낡은 토큰이 헤더에 붙어 있어도 통과**합니다. 그러지 않으면 만료된
+  토큰을 지우지 않은 앱이 재로그인조차 못 하게 됩니다.
+
+### 로그인이 필요한 엔드포인트
+
+| | |
+|---|---|
+| 후기·댓글 | `POST /v1/reviews`, `POST /v1/reviews/:id/comments` |
+| 게시글 | `POST /v1/posts`, `DELETE /v1/posts/:id`, 좋아요, `POST /v1/posts/:id/comments` |
+| 플랜 | `GET/PUT/DELETE /v1/plans…`, 확정 |
+| 저장 | `GET /v1/saved-places`, `PUT/DELETE /v1/saved-places/:contentId` |
+| 게시글 목록의 내 것 필터 | `GET /v1/posts?mine=true`, `?liked=true` |
+
+> ⚠️ **`deviceId`는 더 이상 신원이 아닙니다.** 예전에는 이 값만으로 그 사람이 되어, 값을 아는
+> 사람이 남의 데이터를 보거나 대신 글을 쓸 수 있었습니다. 지금 쓰기 라우트는 `deviceId`를
+> 아예 읽지 않습니다. 가입·로그인 요청에서만 "어느 기기인가"를 기록하는 데 씁니다.
 - 세션은 쓰는 동안 자동 연장되지만(기본 90일), **생성 후 180일이 지나면 만료**됩니다.
 - `sign-in`·`sign-up`은 **낡은 토큰이 헤더에 붙어 있어도 통과**합니다. 그러지 않으면 만료된
   토큰을 지우지 않은 앱이 재로그인조차 못 하게 됩니다.
@@ -43,14 +59,12 @@ X-Session-Token: <SESSION_TOKEN>
 
 이메일 로그인. 애플·구글·카카오·네이버는 아직 붙지 않았다(스키마와 병합 규칙은 준비돼 있다).
 
-### 왜 `deviceId`를 함께 보내야 하나 — **가입/로그인 시 반드시 보내세요**
+### 온보딩 프로필을 함께 보내세요
 
-로그인하기 전에 익명으로 쓴 후기·플랜·저장·게시글이 있습니다. 가입·로그인 요청에 그 기기의
-`deviceId`가 들어 있어야 서버가 그것들을 계정으로 **옮겨 줍니다.** 빠뜨리면 익명 데이터가
-그대로 남아 사용자에게는 사라진 것처럼 보입니다.
+익명 사용이 없어졌으므로 **서버에는 로그인 계정만 존재합니다.** 온보딩에서 고른 무장애 항목은
+앱이 로컬에 갖고 있다가 **가입 요청에 실어 보내면** 계정에 저장됩니다(`accessFeatures`).
 
-응답의 `merged`가 `true`면 실제로 합쳐진 것이니, 앱에서 "기존에 작성하신 내용을 가져왔습니다"
-같은 안내를 띄우면 됩니다.
+`deviceId`는 선택입니다 — 보내면 "이 계정이 이 기기를 쓴다"는 기록만 남습니다.
 
 ### POST /v1/auth/email/sign-up — 이메일 가입
 
@@ -58,7 +72,8 @@ X-Session-Token: <SESSION_TOKEN>
 |---|---|---|
 | `email` | ✅ | 이메일. 대소문자 구분 없음(소문자로 저장) |
 | `password` | ✅ | 8~128자 |
-| `deviceId` | 권장 | 이 기기의 익명 데이터를 계정으로 가져오는 데 쓴다 |
+| `accessFeatures` | — | 온보딩에서 고른 무장애 항목(문자열 배열, 최대 32개). 코드는 앱의 `AccessibilityFeature` rawValue |
+| `deviceId` | — | 기기 기록용(≤128자). 신원으로 쓰이지 않는다 |
 | `nickname` | — | 생략 시 기존 익명 닉네임 유지, 그것도 없으면 `여행자` |
 
 **201**:
@@ -66,19 +81,27 @@ X-Session-Token: <SESSION_TOKEN>
 {
   "token": "44HSQNBT-B6Y6vc616L1b4LV6rR3fayrjeOHMdtWBEI",
   "expiresAt": "2026-11-18T07:23:47.935Z",
-  "author": { "uuid": "f5ee33a7-…", "nickname": "에이", "email": "me@example.com", "emailVerified": false },
-  "merged": false,
+  "author": {
+    "uuid": "f5ee33a7-…", "nickname": "에이",
+    "email": "me@example.com", "emailVerified": false,
+    "accessFeatures": ["wheelchairAccessible", "elderlyFriendly"],
+    "onboarded": true
+  },
   "created": true
 }
 ```
 - `token`은 **이 응답에서 한 번만** 나옵니다. 서버에 원문이 남지 않아 다시 받을 수 없습니다.
 - `emailVerified`는 항상 `false`입니다 — 이메일 인증은 아직 없습니다(아래 참고).
+- `accessFeatures`는 **가입할 때만** 반영됩니다. 로그인에서도 덮으면 앱을 지웠다 깐 기기로
+  로그인하는 것만으로 사용자가 직접 고친 프로필이 온보딩 기본값으로 되돌아갑니다.
+- `onboarded`는 `accessFeatures` 키를 보냈는지로 결정됩니다 — 빈 배열만으로는
+  "아무것도 고르지 않았다"와 "온보딩을 안 했다"를 구분할 수 없습니다.
 
 오류: `invalid_email` · `invalid_password` · `invalid_nickname` · **`email_taken`(409)**
 
 ### POST /v1/auth/email/sign-in — 로그인
 
-`{email, password, deviceId?}` → 가입과 같은 형태의 **200**.
+`{email, password, deviceId?}` → 가입과 같은 형태의 **200**. (`accessFeatures`는 무시됩니다 — 위 참고)
 
 - 실패는 이유를 구분하지 않고 항상 `invalid_credentials`(401)입니다. 없는 계정과 틀린 비밀번호를
   나눠 주면 그것만으로 가입 여부를 알아낼 수 있기 때문입니다. 응답 시간도 같게 맞춰져 있습니다.
@@ -106,7 +129,11 @@ X-Session-Token: <SESSION_TOKEN>
 `X-Session-Token` 필수. 앱 기동 시 저장된 토큰이 아직 유효한지 확인하는 용도.
 
 ```json
-{ "uuid": "f5ee33a7-…", "nickname": "에이", "email": "me@example.com", "emailVerified": false }
+{
+  "uuid": "f5ee33a7-…", "nickname": "에이",
+  "email": "me@example.com", "emailVerified": false,
+  "accessFeatures": ["wheelchairAccessible"], "onboarded": true
+}
 ```
 
 만료·폐기된 토큰이면 **401** `session_expired` → 토큰을 지우고 로그인 화면으로.
@@ -375,13 +402,13 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 ### POST /v1/reviews — 리뷰 작성
 `Content-Type: application/json`. 인증은 다른 `/v1/*`와 동일(Bearer API 키).
 
-작성자 식별은 **세션 토큰이 우선**이고, 없으면 **기기 UUID(`deviceId`) + 닉네임**이다. 같은 `deviceId`로 여러 번 쓰면 작성자(`authors`) 행은 하나만 생기고 재사용된다.
+**🔒 로그인 필수.** 작성자는 세션의 계정이고, 글은 그 계정에 귀속된다.
 
-> `X-Session-Token`을 보내면 `deviceId`는 생략할 수 있고, 글은 로그인한 계정에 귀속된다.
+`authorNm`은 **선택**이다 — 보내면 계정 닉네임을 갱신하고, 생략하면 기존 닉네임을 그대로 쓴다.
+로그인 계정에는 가입 시 정해진 닉네임이 항상 있으므로 "처음 쓰는 기기" 같은 개념이 없다.
 
 | 필드 | 필수 | 설명 |
 |---|---|---|
-| `deviceId` | ✅ | 기기 UUID(≤128자). **응답에는 절대 포함되지 않는다** — 사실상 신원 토큰 |
 | `locationNm` | ✅ | 표시용 장소명(≤200자) |
 | `rating` | ✅ | 1~5 **정수**(숫자 타입). 소수·문자열은 400 |
 | `body` | ✅ | 본문(공백만이면 400, ≤2000자) |
@@ -400,7 +427,6 @@ curl -X POST "$BASE/v1/reviews" \
     "rating": 4,
     "body": "엘리베이터가 넓어 휠체어로 층 이동이 편했습니다.",
     "authorNm": "바다",
-    "deviceId": "A1B2C3D4-E5F6-4711-8899-AABBCCDDEEFF",
     "tags": ["barrier_free", "parking"],
     "wouldRevisit": true,
     "imageURLs": ["https://example.com/photo1.jpg"]
@@ -428,7 +454,6 @@ curl -X POST "$BASE/v1/reviews" \
 
 | 필드 | 필수 | 설명 |
 |---|---|---|
-| `deviceId` | ✅ | 기기 UUID(≤128자). 응답에 포함되지 않는다 |
 | `body` | ✅ | 댓글 내용(공백만이면 400, ≤1000자) |
 | `authorNm` | 조건부 | 닉네임(≤40자). 처음 쓰는 기기면 필수 |
 
@@ -488,16 +513,16 @@ curl -X POST "$BASE/v1/reviews/images" \
 }
 ```
 검증 실패는 **400** + `{"error": "...", "message": "..."}`:
-`invalid_json` · `invalid_body`(객체 아님/길이 초과) · `missing_deviceId` · `invalid_deviceId` · `missing_locationNm` · `invalid_locationNm` · `missing_body` · `invalid_rating` · `invalid_contentId` · `invalid_authorNm` · `missing_authorNm`(처음 쓰는 기기인데 닉네임 없음) · `invalid_imageURLs`
+`invalid_json` · `invalid_body`(객체 아님/길이 초과) · **`login_required`(401)** · `missing_locationNm` · `invalid_locationNm` · `missing_body` · `invalid_rating` · `invalid_contentId` · `invalid_authorNm` · `invalid_imageURLs`
 
 > ⚠️ **운영 주의.** 쓰기 API가 있으므로 `reviews`·`authors`의 소스는 관리형(prod) DB다.
 > `scripts/push-data.sh`의 파괴적 동기화 대상에서 두 테이블은 제외되어 있다 — 되돌리면 유저 리뷰가 소실된다.
 
 ## 플랜 (여행 일정)
 
-앱의 플랜 탭 데이터. **개인 데이터**라 리뷰와 달리 조회도 소유자로 좁힌다 — 소유자 식별은 리뷰와 같다(세션 토큰 우선, 없으면 `deviceId`).
+앱의 플랜 탭 데이터. **개인 데이터**라 조회도 소유자로 좁힌다.
 
-> 아래 표기의 `?deviceId=`는 **로그인하지 않은 요청에서만 필수**입니다. `X-Session-Token`을 보내면 생략할 수 있습니다.
+> **🔒 이 절의 모든 엔드포인트는 로그인 필수**입니다(`plan-options` 제외). 소유자는 세션의 계정입니다.
 
 ### GET /v1/plan-options — 새 플랜 플로우 선택지
 4/6(테마)·5/6(예산) 화면이 그릴 목록. 사용자별 값이 아니다.
@@ -507,7 +532,7 @@ curl -X POST "$BASE/v1/reviews/images" \
 ```
 표시 문구를 앱에 하드코딩하지 않고 서버가 내려보낸다 — 문구가 바뀔 때 앱 재배포 대신 서버 배포로 끝난다.
 
-### GET /v1/plans?deviceId= — 내 플랜 목록
+### GET /v1/plans — 내 플랜 목록
 최근 여행부터. **본문(`days`)은 싣지 않는다** — 목록 카드에 필요 없다.
 ```json
 { "count": 1, "items": [{
@@ -517,7 +542,7 @@ curl -X POST "$BASE/v1/reviews/images" \
   "coverImageURL": null, "createdAt": "…", "updatedAt": "…" }] }
 ```
 
-### GET /v1/plans/:planId?deviceId= — 플랜 상세
+### GET /v1/plans/:planId — 플랜 상세
 위 필드 + `days[]`. 없는 플랜과 **남의 플랜을 구분해 주지 않는다**(둘 다 404) — 존재 여부가 새어 나갈 이유가 없다.
 ```json
 { "…": "목록과 동일", "days": [{
@@ -535,7 +560,6 @@ curl -X POST "$BASE/v1/reviews/images" \
 
 | 필드 | 필수 | 설명 |
 |---|---|---|
-| `deviceId` | ✅ | 소유자 식별. 응답에 포함되지 않는다 |
 | `title` | ✅ | ≤60자 |
 | `startDate`/`endDate` | ✅ | `YYYY-MM-DD`. 종료일이 앞서면 400 |
 | `authorNm` | 조건부 | 처음 저장하는 기기면 필수 |
@@ -550,11 +574,11 @@ curl -X POST "$BASE/v1/reviews/images" \
 - 하루 수 60일 · 하루 항목 60개 상한
 - **이동 거리는 저장하지 않는다.** 좌표만 있으면 계산할 수 있고, 저장하면 순서를 바꿀 때마다 갱신해야 하는데 그 갱신을 반드시 어딘가에서 빠뜨린다
 
-### DELETE /v1/plans/:planId?deviceId= — 플랜 삭제
+### DELETE /v1/plans/:planId — 플랜 삭제
 목록 카드의 `⋮` 메뉴가 쓸 자리. 성공 시 **204**(본문 없음). `days`/`items`는 cascade로 함께 지워진다.
 
 - 남의 플랜·없는 플랜 모두 **404** — 조회와 같은 규칙이다(존재 여부를 흘리지 않는다)
-- `deviceId` 누락은 400
+- 로그인하지 않으면 401 `login_required`
 - ⚠️ **되돌릴 수 없다.** 휴지통을 두지 않은 이유: 플랜은 사용자가 직접 만든 소수의 데이터라 다시 만드는 비용이 크지 않고, 소프트 삭제를 넣으면 목록·상세 조회 전부에 조건이 붙어 실수할 여지가 늘어난다
 
 ## 예제
