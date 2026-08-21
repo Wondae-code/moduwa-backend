@@ -190,6 +190,29 @@ export async function signIn(params: {
   });
 }
 
+/** 이메일 신원의 비밀번호를 바꾼다(재설정). provider='email' 행만 대상이다. */
+export async function setEmailPassword(authorId: number, passwordHash: string): Promise<void> {
+  await query(
+    `update author_identities set password_hash = $2, updated_at = now()
+      where author_id = $1 and provider = 'email'`,
+    [authorId, passwordHash],
+  );
+}
+
+/**
+ * 이메일 소유 확인을 기록한다.
+ * 확인한 주소를 함께 받아 **그 주소가 지금도 계정 주소일 때만** 찍는다 —
+ * 코드를 받은 뒤 주소를 바꿨다면 그 확인은 새 주소에 대한 것이 아니다.
+ */
+export async function markEmailVerified(authorId: number, email: string): Promise<boolean> {
+  const res = await query(
+    `update authors set email_verified_at = now()
+      where id = $1 and lower(email) = $2 and email_verified_at is null`,
+    [authorId, normalizeEmail(email)],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
 /**
  * 로그아웃 — 기기 바인딩만 끊는다. 계정과 그 데이터는 그대로 남고, 다시 로그인하면 돌아온다.
  * authors.device_id 까지 비우는 것이 중요하다. 남겨 두면 구버전 폴백 경로가 방금 끊은

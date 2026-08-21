@@ -13,10 +13,14 @@ import { query } from '../db';
 import {
   type SignInResult,
   findEmailIdentity,
+  markEmailVerified,
   normalizeEmail,
+  setEmailPassword,
   signIn,
   signOutDevice,
 } from './accounts';
+import { type CodePurpose, consumeCode, issueCode, secondsSinceLastCode } from './email-codes';
+import { buildCodeMail, sendMail } from './mailer';
 import {
   MAX_PASSWORD_LENGTH,
   burnVerifyTime,
@@ -25,7 +29,7 @@ import {
   verifyPassword,
 } from './password';
 import { type AppEnv, clientIp } from './middleware';
-import { issueSession, revokeDeviceSessions, revokeSession } from './sessions';
+import { issueSession, revokeAuthorSessions, revokeDeviceSessions, revokeSession } from './sessions';
 
 // 이메일 형식 — 완벽한 RFC 검증은 불가능하고 실익도 없다. 명백한 오타만 걸러내고
 //  진짜 소유 확인은 인증 메일이 맡는다(도메인 확보 후 별도 단계).
@@ -115,6 +119,34 @@ async function finishSignIn(result: SignInResult, deviceId: string) {
   };
 }
 
+// 같은 목적의 코드를 다시 보내기까지 기다려야 하는 최소 간격(초).
+//  없으면 남의 주소에 대고 재발송을 반복해 **메일 폭탄**을 보낼 수 있다.
+const RESEND_INTERVAL_SEC = 60;
+
+/**
+ * 코드를 발급해 메일로 보낸다.
+ *
+ * 발송 실패로 요청을 실패시키지 않는다(mailer.sendMail 주석 참고) — 실패가 곧
+ * "이 주소는 가입돼 있다"는 신호가 되고, 가입 직후라면 사용자가 빠져나갈 방법이 없어진다.
+ * 실패는 서버 로그에 남고 사용자는 재발송을 누르면 된다.
+ */
+async function issueAndSend(authorId: number, purpose: CodePurpose, email: string): Promise<void> {
+  const { code, minutes } = await issueCode(authorId, purpose, email);
+  const mail = buildCodeMail(purpose, code, minutes);
+  await sendMail({ to: email, ...mail });
+}
+
+/** 코드 검증 실패 응답. 사유별로 앱이 다른 안내를 띄울 수 있게 코드를 나눈다. */
+function codeError(c: Context<AppEnv>, reason: 'invalid' | 'expired' | 'too_many') {
+  if (reason === 'expired') {
+    return c.json({ error: 'code_expired', message: '코드가 만료되었습니다. 다시 받아주세요.' }, 400);
+  }
+  if (reason === 'too_many') {
+    return c.json({ error: 'code_attempts_exceeded', message: '시도 횟수를 초과했습니다. 코드를 다시 받아주세요.' }, 429);
+  }
+  return c.json({ error: 'invalid_code', message: '코드가 올바르지 않습니다.' }, 400);
+}
+
 /** 본문 파싱 — 다른 라우트와 같은 방식(JSON 객체가 아니면 400). */
 async function readBody(c: Context<AppEnv>): Promise<Record<string, unknown> | null> {
   try {
@@ -186,6 +218,8 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       passwordHash,
       accessFeatures,
     });
+    // 가입 직후 인증 코드를 보낸다. 실패해도 가입은 성공으로 둔다 — 앱에서 재발송할 수 있다.
+    await issueAndSend(result.authorId, 'verify', email);
     return c.json(await finishSignIn(result, deviceId), 201);
   });
 
@@ -249,6 +283,112 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       await signOutDevice(deviceId, revoked.authorId);
     }
     return c.json({ ok: true });
+  });
+
+  // ── 이메일 인증 ────────────────────────────────────────────────────────────
+  //  가입 시 자동으로 한 번 보내고, 못 받았을 때 이 라우트로 재발송한다.
+  //  세션을 요구한다 — 인증할 대상이 "지금 로그인한 계정"으로 특정되어야 하고,
+  //  그래야 남의 주소에 대고 재발송을 유발할 수 없다.
+  auth.post('/email/verify/request', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401);
+
+    const row = (await query<{ email: string | null; verified: Date | null }>(
+      'select email, email_verified_at as verified from authors where id = $1', [authorId],
+    )).rows[0];
+    if (!row?.email) return c.json({ error: 'no_email', message: '계정에 이메일이 없습니다.' }, 400);
+    // 이미 인증된 계정에 또 보내지 않는다(메일 낭비이고 사용자도 혼란스럽다).
+    if (row.verified) return c.json({ ok: true, alreadyVerified: true });
+
+    const since = await secondsSinceLastCode(authorId, 'verify');
+    if (since != null && since < RESEND_INTERVAL_SEC) {
+      return c.json({
+        error: 'resend_too_soon',
+        message: `${RESEND_INTERVAL_SEC - since}초 후에 다시 시도해주세요.`,
+        retryAfter: RESEND_INTERVAL_SEC - since,
+      }, 429);
+    }
+
+    await issueAndSend(authorId, 'verify', normalizeEmail(row.email));
+    return c.json({ ok: true });
+  });
+
+  auth.post('/email/verify', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401);
+
+    const p = await readBody(c);
+    const code = str(p?.code);
+    const row = (await query<{ email: string | null }>(
+      'select email from authors where id = $1', [authorId],
+    )).rows[0];
+    if (!row?.email) return c.json({ error: 'no_email', message: '계정에 이메일이 없습니다.' }, 400);
+
+    const result = await consumeCode(authorId, 'verify', code, normalizeEmail(row.email));
+    if (result !== 'ok') return codeError(c, result);
+
+    await markEmailVerified(authorId, row.email);
+    return c.json({ ok: true, emailVerified: true });
+  });
+
+  // ── 비밀번호 재설정 ────────────────────────────────────────────────────────
+  //  ⚠️ 이 라우트는 **가입 여부를 알려주지 않는다.** 없는 주소든 있는 주소든 똑같이 200 이다.
+  //     알려주면 그것만으로 이메일 열거가 되고, 그 목록이 곧 무차별 대입 대상이 된다.
+  auth.post('/email/forgot', async (c) => {
+    if (tooManyAttempts(c)) {
+      return c.json({ error: 'too_many_attempts', message: '요청이 많습니다. 잠시 후 다시 시도해주세요.' }, 429);
+    }
+    recordAttempt(c);
+
+    const p = await readBody(c);
+    const email = normalizeEmail(str(p?.email));
+    // 형식이 틀렸어도 같은 응답을 준다 — 응답이 갈리면 그것도 신호가 된다.
+    if (email && email.length <= MAX_EMAIL_LENGTH && EMAIL_RE.test(email)) {
+      const identity = await findEmailIdentity(email);
+      // 비밀번호가 없는 신원(소셜로만 가입)에는 보내지 않는다 — 재설정할 비밀번호가 없다.
+      if (identity?.passwordHash) {
+        const since = await secondsSinceLastCode(identity.authorId, 'reset');
+        // 간격 제한도 조용히 지나간다. 429 를 주면 "이 주소는 존재한다"가 새어 나간다.
+        if (since == null || since >= RESEND_INTERVAL_SEC) {
+          await issueAndSend(identity.authorId, 'reset', email);
+        }
+      }
+    }
+    return c.json({ ok: true, message: '가입된 주소라면 재설정 코드를 보냈습니다.' });
+  });
+
+  auth.post('/email/reset', async (c) => {
+    if (tooManyAttempts(c)) {
+      return c.json({ error: 'too_many_attempts', message: '요청이 많습니다. 잠시 후 다시 시도해주세요.' }, 429);
+    }
+
+    const p = await readBody(c);
+    if (!p) return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
+    const email = normalizeEmail(str(p.email));
+    const code = str(p.code);
+    const password = typeof p.password === 'string' ? p.password : '';
+
+    const policy = passwordPolicyError(password);
+    if (policy) return c.json({ error: 'invalid_password', message: policy }, 400);
+
+    const identity = email ? await findEmailIdentity(email) : null;
+    if (!identity) {
+      recordAttempt(c);
+      // 코드 검증 실패와 같은 응답을 준다 — 여기서 갈리면 열거가 된다.
+      return codeError(c, 'invalid');
+    }
+
+    const result = await consumeCode(identity.authorId, 'reset', code, email);
+    if (result !== 'ok') {
+      recordAttempt(c);
+      return codeError(c, result);
+    }
+
+    await setEmailPassword(identity.authorId, await hashPassword(password));
+    // ⚠️ 비밀번호를 바꾸면 **모든 세션을 끊는다.** 계정을 되찾는 상황은 남이 들어와 있을 수
+    //    있다는 뜻이고, 비밀번호만 바꾸고 그 사람의 세션을 살려 두면 되찾은 게 아니다.
+    await revokeAuthorSessions(identity.authorId);
+    return c.json({ ok: true, message: '비밀번호가 변경되었습니다. 다시 로그인해주세요.' });
   });
 
   // ── 현재 계정 ──────────────────────────────────────────────────────────────

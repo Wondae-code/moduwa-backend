@@ -92,6 +92,22 @@ export const config = {
     trustedProxyHops: num('TRUSTED_PROXY_HOPS', 1),
   },
 
+  // ── 메일 발송 ──
+  //  이메일 인증·비밀번호 재설정에 쓴다. 이 둘이 없으면 "비밀번호를 잊으면 계정 복구 불가"가
+  //  되므로 출시 전 필수다.
+  mail: {
+    // Resend API 키. **비우면 실제로 보내지 않고 콘솔에 찍는다**(로컬 개발).
+    //  그게 오히려 편하다 — 메일함을 열지 않고 터미널에서 코드를 바로 복사할 수 있다.
+    resendApiKey: process.env.RESEND_API_KEY?.trim() ?? '',
+    // ⚠️ 발송 도메인과 **반드시** 일치해야 한다. Resend 에 등록한 도메인이 mail.moduwa.app 이므로
+    //    noreply@moduwa.app 로 보내면 DKIM 정렬이 깨져 스팸함으로 간다.
+    from: process.env.MAIL_FROM?.trim() || '모두와 <noreply@mail.moduwa.app>',
+    // 인증·재설정 코드 유효시간(분).
+    //  ⚠️ 짧게 두는 편이 안전하지만 너무 짧으면 메일이 도착하기 전에 만료된다. 국내 수신
+    //     서버는 스팸 판정으로 몇 분 지연시키는 경우가 있어 그보다는 넉넉해야 한다.
+    codeMinutes: num('EMAIL_CODE_MINUTES', 10),
+  },
+
   // ── 수집 현황 대시보드(/dashboard) ──
   //  비밀번호가 비어 있으면 라우트 자체를 등록하지 않는다 — 환경변수를 깜빡한 채 배포해도
   //  "인증 없이 열린 대시보드"가 생기지 않게 하는 게 안전한 기본값이다.

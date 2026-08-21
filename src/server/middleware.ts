@@ -73,7 +73,14 @@ export function clientIp(c: Context<AppEnv>): string {
  */
 // 세션 없이 들어와야 하는 경로. 만료된 토큰을 아직 못 지운 앱이 **재로그인조차 못 하는**
 //  상태를 막는다(토큰이 붙어 있으면 401 이 나서 로그인 요청 자체가 막힌다).
-const SESSION_OPTIONAL_PATHS = ['/v1/auth/email/sign-in', '/v1/auth/email/sign-up'];
+//  비밀번호 재설정도 포함한다 — 비밀번호를 잊은 사람은 낡은 토큰을 들고 있을 가능성이 높고,
+//  그 토큰 때문에 재설정이 401 이 되면 계정을 되찾을 길이 막힌다.
+const SESSION_OPTIONAL_PATHS = [
+  '/v1/auth/email/sign-in',
+  '/v1/auth/email/sign-up',
+  '/v1/auth/email/forgot',
+  '/v1/auth/email/reset',
+];
 
 export async function sessionAuth(c: Context<AppEnv>, next: Next): Promise<Response | void> {
   const token = c.req.header(SESSION_HEADER)?.trim();
