@@ -16,12 +16,9 @@ ENV NODE_ENV=production
 # 플랫폼이 PORT를 주입하면 그걸 사용(config에서 읽음). 기본 8080.
 EXPOSE 8080
 
-# 부팅 시 마이그레이션을 먼저 돌린다.
-#  · migrate 는 적용 이력(schema_migrations)을 보고 **바뀐 파일만** 실행한다. 평소에는
-#    0.2초 안에 끝나므로 기동이 느려지지 않는다.
-#  · 어드바이저리 락으로 한 프로세스만 진행한다. 배포 중 구·신 컨테이너가 겹쳐도
-#    둘이 같은 alter table 을 물고 교착되지 않는다(그것 때문에 한 번 502 로 내려갔다).
-#  · 관리형 DB 의 DATABASE_URL 은 내부 호스트라 컨테이너 안에서만 해석된다. 여기서 돌리면
-#    DB 비밀값을 밖으로 꺼내지 않아도 된다.
-#  · 실패하면 서버가 뜨지 않는다. 스키마가 어긋난 채 요청을 받는 것보다 낫다.
-CMD ["npm", "run", "start:deploy"]
+# ⚠️ 마이그레이션을 여기서 돌리지 않는다.
+#  `alter table ... add column if not exists` 는 **컬럼이 이미 있어도** ACCESS EXCLUSIVE 락을
+#  잡는다. 배포 중에는 구버전 컨테이너가 barrier_free 를 계속 읽고 있어 그 락을 얻지 못하고,
+#  lock_timeout 에 걸려 기동이 실패한다(실제로 크래시 루프로 서비스가 내려갔다).
+#  마이그레이션은 배포와 분리해 별도로 실행한다 — docs/DEPLOY.md 참고.
+CMD ["npm", "start"]
