@@ -247,6 +247,33 @@ export function buildApp(): Hono<AppEnv> {
     infant: 'access_infant',
   };
 
+  /**
+   * 그룹별로 **그 축의 속성이 몇 개나 채워졌는지**. 28속성을 네 그룹으로 나눈 것이다
+   * (ACCESS_SCORE 와 같은 목록, 같은 순서).
+   *
+   * 왜 필요한가: `access=` 로 후보를 좁혀도 **첫 페이지가 그대로였다.** 기본 정렬이 28속성
+   * 전체 개수라, 속성을 가장 많이 채운 대형 시설은 어느 그룹 조건에도 다 걸려 어떤 부분집합에도
+   * 남는다 — 숙소에서 후보가 1,060 → 190 으로 줄어도 상위 6곳이 한 곳도 바뀌지 않았다
+   * (2026-08-22 측정). 사용자에게는 필터가 고장난 것으로 보인다.
+   *
+   * 그래서 필터가 걸리면 **고른 축의 충실도**를 첫 정렬 키로 쓴다. "유아 동반"을 고르면
+   * 유아 관련 4속성이 다 채워진 곳이 먼저 온다 — 그게 그 사람이 물은 질문이다.
+   * 전체 개수는 두 번째 키로 남는다(같은 충실도면 정보가 풍부한 곳이 낫다).
+   */
+  const ACCESS_GROUP_SCORES: Record<string, string> = {
+    wheelchair: `((parking is not null)::int + (route is not null)::int + (publictransport is not null)::int
+      + (ticketoffice is not null)::int + (promotion is not null)::int + (wheelchair is not null)::int
+      + (exit is not null)::int + (elevator is not null)::int + (restroom is not null)::int
+      + (auditorium is not null)::int + (room is not null)::int + (handicapetc is not null)::int)`,
+    visual: `((braileblock is not null)::int + (helpdog is not null)::int + (guidehuman is not null)::int
+      + (audioguide is not null)::int + (bigprint is not null)::int + (brailepromotion is not null)::int
+      + (guidesystem is not null)::int + (blindhandicapetc is not null)::int)`,
+    hearing: `((signguide is not null)::int + (videoguide is not null)::int
+      + (hearingroom is not null)::int + (hearinghandicapetc is not null)::int)`,
+    infant: `((stroller is not null)::int + (lactationroom is not null)::int
+      + (babysparechair is not null)::int + (infantsfamilyetc is not null)::int)`,
+  };
+
   v1.get('/barrier-free', async (c) => {
     const { limit, offset } = paging(c);
     const where: string[] = [];
@@ -269,10 +296,9 @@ export function buildApp(): Hono<AppEnv> {
     //  ⚠️ 데이터가 얇은 그룹이 있다. 청각은 전국 107곳뿐이라(관광지 27·맛집 22·숙소 23·축제 0)
     //     이 필터를 걸면 목록이 빠르게 바닥난다. 채워 넣지 않는다 — 없는 것을 있는 것처럼
     //     보여 주면 무장애 앱에서는 그게 가장 나쁜 거짓말이다.
-    for (const name of (c.req.query('access') ?? '').split(',').map((v) => v.trim()).filter(Boolean)) {
-      const column = ACCESS_GROUP_COLUMNS[name];
-      if (column) where.push(column);
-    }
+    const accessGroups = (c.req.query('access') ?? '')
+      .split(',').map((v) => v.trim()).filter((name) => ACCESS_GROUP_COLUMNS[name]);
+    for (const name of accessGroups) where.push(ACCESS_GROUP_COLUMNS[name]!);
 
     // 정렬. 구 기본값(has_image desc, has_access desc, contentid)은 앱이 hasImage/hasAccess 를
     // 이미 필터로 걸고 부르기 때문에 앞의 두 키가 결과 안에서 상수가 되어, 사실상 contentid 순
@@ -296,7 +322,20 @@ export function buildApp(): Hono<AppEnv> {
         //  안 올렸다는 뜻뿐이고, 무장애 여행 앱에서 그걸로 5곳 중 1곳(2,045/10,262)을 지울 이유가 없다.
         //  ⚠️ 점수가 4 언저리에 몰려 있어 감점을 크게 주면 사실상 필터와 같아진다. 3이면
         //  평범한 무사진 장소(4→1)는 뒤로 가지만 정보가 아주 풍부한 곳(18→15)은 앞에 남는다.
-        orderBy = `(${ACCESS_SCORE} - 3 * (not coalesce(has_image, false))::int) desc, contentid`;
+        {
+          // 사진 없는 장소는 **감점**으로 뒤로 민다(걸러내지는 않는다, 위 주석 참고).
+          const overall = `(${ACCESS_SCORE} - 3 * (not coalesce(has_image, false))::int) desc`;
+          // 조건을 걸었으면 **그 축을 얼마나 갖췄는지**가 먼저다. 그러지 않으면 필터를 걸어도
+          //  첫 페이지가 그대로라 사용자에게는 아무 일도 안 일어난 것으로 보인다.
+          const matched = accessGroups.map((name) => ACCESS_GROUP_SCORES[name]!);
+          // 같은 충실도면 **사진 있는 곳이 먼저** 온다. 전체 점수의 -3 감점을 그대로 쓸 수 없다 —
+          //  그룹 점수는 4~12점 척도라 -3 이면 사실상 필터가 되어, 사진이 없다는 이유로
+          //  가장 잘 맞는 곳이 통째로 사라진다(무장애 정보량과 사진 유무는 무관하다는 측정이
+          //  애초에 걸러내지 않기로 한 근거였다). 그래서 감점 대신 동점 처리로 둔다.
+          orderBy = matched.length
+            ? `(${matched.join(' + ')}) desc, has_image desc nulls last, ${overall}, contentid`
+            : `${overall}, contentid`;
+        }
     }
 
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
