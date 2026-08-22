@@ -63,6 +63,32 @@ async function main() {
   // 세션 단위 락이라 전용 커넥션이 필요하다(풀에서 매번 다른 커넥션을 받으면 락이 풀린다).
   console.log('[migrate] DB 연결 중...');
   const client = await pool.connect();
+
+  // 이 실행을 pg_stat_activity 에서 알아볼 수 있게 표식을 남긴다.
+  await client.query("set application_name = 'moduwa-migrate'");
+
+  // ⚠️ 유령 세션의 **근본 방지.** 클라이언트가 죽어도(Ctrl+C·네트워크 단절) 서버는 결과를
+  //    쓰려는 순간까지 끊김을 모른 채 문장을 계속 실행하고, 세션 락(어드바이저리 락 포함)을
+  //    계속 쥔다. 프록시(Railway) 뒤에서는 그 "순간"이 수십 분씩 늦어져 실제로 두 번 발생했다.
+  //    이 설정(PG14+)은 긴 문장 실행 중에도 10초마다 소켓 생존을 확인해 죽은 세션을 끝낸다.
+  const alive = await client.query("set client_connection_check_interval = '10s'")
+    .then(() => true, () => false);
+  if (!alive) console.warn('[migrate] client_connection_check_interval 미지원(PG13 이하) — 유령 세션 자동 정리 없이 진행');
+
+  const backendPid = (await client.query<{ pid: number }>('select pg_backend_pid() as pid')).rows[0]!.pid;
+
+  // Ctrl+C 는 클라이언트만 죽인다 — **서버 쪽 실행을 함께 취소**해야 유령 세션이 안 남는다.
+  // 실행 중인 커넥션으로는 명령을 보낼 수 없으므로 새 커넥션에서 우리 백엔드를 취소한다.
+  // 취소되면 진행 중이던 await 가 에러로 풀리며 아래 finally 가 락 해제까지 정리한다.
+  const onSignal = () => {
+    console.error('\n[migrate] 중단 요청 — 서버 쪽 실행을 취소하는 중...');
+    pool.connect().then(async (c2) => {
+      try { await c2.query('select pg_cancel_backend($1)', [backendPid]); } finally { c2.release(); }
+    }).catch(() => process.exit(130));
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+
   let locked = false;
   try {
     await client.query(`
