@@ -15,6 +15,7 @@ import {
   type SignInResult,
   findEmailIdentity,
   markEmailVerified,
+  setAccessFeatures,
   normalizeEmail,
   setEmailPassword,
   signIn,
@@ -500,6 +501,51 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     )).rows[0];
     if (!row) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
 
+    return c.json({
+      uuid: row.uuid,
+      nickname: row.nickname,
+      email: row.email,
+      emailVerified: row.verified != null,
+      accessFeatures: row.access_features,
+      onboarded: row.onboarded_at != null,
+    } satisfies AuthorView);
+  });
+
+  // ── 무장애 프로필 수정 ─────────────────────────────────────────────────────
+  //  가입 때 한 번 정하고 끝낼 값이 아니다 — 필요한 것은 바뀐다. 앱의 "내 정보" 화면이 쓴다.
+  auth.patch('/me', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401);
+
+    const p = await readBody(c);
+    if (!p) return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
+    // 키가 없으면 바꿀 것이 없다. 빈 배열(= 필요한 것 없음)과 구분해야 하므로 undefined 를 본다.
+    if (p.accessFeatures === undefined) {
+      return c.json({ error: 'nothing_to_update', message: '바꿀 항목이 없습니다.' }, 400);
+    }
+    if (!Array.isArray(p.accessFeatures)) {
+      return c.json({ error: 'invalid_accessFeatures', message: 'accessFeatures 는 문자열 배열이어야 합니다.' }, 400);
+    }
+
+    // 값은 검증하지 않는다(앱이 항목을 늘려도 서버 배포 없이 따라가야 한다). 개수와 길이만 막는다 —
+    //  검증하지 않는 배열에 상한이 없으면 그대로 저장소가 된다(가입 라우트와 같은 규칙).
+    const features = p.accessFeatures
+      .filter((v): v is string => typeof v === 'string' && v.length <= 40)
+      .slice(0, MAX_ACCESS_FEATURES);
+
+    await setAccessFeatures(authorId, features);
+
+    const row = (await query<{
+      uuid: string; nickname: string; email: string | null; verified: Date | null;
+      access_features: string[]; onboarded_at: Date | null;
+    }>(
+      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at
+         from authors where id = $1`,
+      [authorId],
+    )).rows[0];
+    if (!row) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
+
+    // 갱신된 계정을 그대로 돌려준다 — 앱이 화면을 다시 그릴 때 재조회하지 않아도 되게.
     return c.json({
       uuid: row.uuid,
       nickname: row.nickname,

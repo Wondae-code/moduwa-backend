@@ -233,6 +233,20 @@ export function buildApp(): Hono<AppEnv> {
   + (stroller is not null)::int + (lactationroom is not null)::int
   + (babysparechair is not null)::int + (infantsfamilyetc is not null)::int)`;
 
+  /**
+   * 접근성 그룹 이름 → 컬럼(015). 앱의 `AccessibilityFeature` 중 **서버가 아는 것만** 있다.
+   *
+   * 고령자 친화(`elderly`)가 없는 것은 빠뜨린 게 아니다 — 관광공사 원본에 그 축이 없고,
+   * 휠체어로 근사하면 "고령자 친화 = 휠체어"라는 틀린 말이 데이터에 박힌다. 새 축을 만들려면
+   * 28개 속성 중 무엇이 고령자 친화인지 정하고 ingest 에서 다시 계산해야 한다(별도 작업).
+   */
+  const ACCESS_GROUP_COLUMNS: Record<string, string> = {
+    wheelchair: 'access_wheelchair',
+    visual: 'access_visual',
+    hearing: 'access_hearing',
+    infant: 'access_infant',
+  };
+
   v1.get('/barrier-free', async (c) => {
     const { limit, offset } = paging(c);
     const where: string[] = [];
@@ -245,6 +259,20 @@ export function buildApp(): Hono<AppEnv> {
     const q = c.req.query('q');              if (q) add('title ilike ?', `%${q}%`);
     if (c.req.query('hasImage') === 'true') where.push('has_image');
     if (c.req.query('hasAccess') === 'true') where.push('has_access');
+
+    // 접근성 그룹 필터(015 의 4개 플래그). `access=wheelchair,infant` 처럼 콤마로 준다.
+    //  **AND 다** — 휠체어도 필요하고 유아 동반도 하는 사람에게 둘 중 하나만 되는 곳은
+    //  갈 수 있는 곳이 아니다. OR 로 두면 휠체어(9,270곳)가 결과를 삼켜 필터가 무의미해진다.
+    //
+    //  ⚠️ 모르는 이름은 **조용히 무시한다**(400 이 아니다). 앱이 서버보다 먼저 항목을 늘릴 수
+    //     있는데, 그때 400 을 주면 홈 화면 전체가 빈다. 필터가 하나 덜 걸리는 편이 낫다.
+    //  ⚠️ 데이터가 얇은 그룹이 있다. 청각은 전국 107곳뿐이라(관광지 27·맛집 22·숙소 23·축제 0)
+    //     이 필터를 걸면 목록이 빠르게 바닥난다. 채워 넣지 않는다 — 없는 것을 있는 것처럼
+    //     보여 주면 무장애 앱에서는 그게 가장 나쁜 거짓말이다.
+    for (const name of (c.req.query('access') ?? '').split(',').map((v) => v.trim()).filter(Boolean)) {
+      const column = ACCESS_GROUP_COLUMNS[name];
+      if (column) where.push(column);
+    }
 
     // 정렬. 구 기본값(has_image desc, has_access desc, contentid)은 앱이 hasImage/hasAccess 를
     // 이미 필터로 걸고 부르기 때문에 앞의 두 키가 결과 안에서 상수가 되어, 사실상 contentid 순

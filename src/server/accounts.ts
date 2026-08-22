@@ -201,6 +201,26 @@ export async function setEmailPassword(authorId: number, passwordHash: string): 
 }
 
 /**
+ * 무장애 프로필을 바꾼다(내 정보 화면).
+ *
+ * 가입 때 한 번 정하고 끝낼 값이 아니다 — 다치거나 회복하거나 아이가 크면 필요한 것이 바뀐다.
+ * 온보딩에서 아무것도 고르지 않은 사람이 나중에 고르는 경로이기도 하다.
+ *
+ * **빈 배열도 유효한 선택이다**("지금은 필요한 것이 없다"). 그래서 이 함수를 부르는 것 자체가
+ * 온보딩을 마쳤다는 뜻이고, `onboarded_at` 이 비어 있으면 이때 찍는다 — 앱이 온보딩을 다시
+ * 띄우지 않게 하려면 "고른 것이 없다"와 "고른 적이 없다"가 구분되어야 한다(030).
+ */
+export async function setAccessFeatures(authorId: number, features: string[]): Promise<void> {
+  await query(
+    `update authors
+        set access_features = $2,
+            onboarded_at    = coalesce(onboarded_at, now())
+      where id = $1`,
+    [authorId, features],
+  );
+}
+
+/**
  * 이메일 소유 확인을 기록한다.
  * 확인한 주소를 함께 받아 **그 주소가 지금도 계정 주소일 때만** 찍는다 —
  * 코드를 받은 뒤 주소를 바꿨다면 그 확인은 새 주소에 대한 것이 아니다.
