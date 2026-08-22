@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type pg from 'pg';
 import { pool } from './db';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -9,6 +10,26 @@ const sqlDir = join(here, '..', 'sql');
 
 // 어드바이저리 락 키. 값 자체는 뜻이 없고 다른 잠금과 겹치지 않기만 하면 된다('modu').
 const LOCK_KEY = 0x6d6f6475;
+
+/** 어드바이저리 락을 기다리는 시한. 넘으면 무엇이 쥐고 있는지 알려주고 끝낸다. */
+const LOCK_WAIT_MS = 30_000;
+
+/** 락을 쥔 세션을 찾아 조치할 수 있는 형태로 알려준다. 그냥 "실패"보다 훨씬 쓸모 있다. */
+async function lockHolderMessage(client: pg.PoolClient): Promise<string> {
+  const rows = (await client.query<{ pid: number; state: string; secs: number }>(
+    `select a.pid, a.state, extract(epoch from (now() - a.state_change))::int as secs
+       from pg_locks l join pg_stat_activity a on a.pid = l.pid
+      where l.locktype = 'advisory' and l.objid = $1 and l.granted`,
+    [LOCK_KEY],
+  )).rows;
+  if (rows.length === 0) {
+    return '다른 프로세스가 마이그레이션 잠금을 쥐고 있습니다(소유자 확인 실패). 잠시 후 다시 시도하세요.';
+  }
+  const who = rows.map((r) => `pid ${r.pid} (${r.state}, ${r.secs}초째)`).join(', ');
+  return `다른 프로세스가 마이그레이션 잠금을 쥐고 있습니다 — ${who}.\n`
+    + `  중단된 실행이 남긴 유령 세션일 수 있습니다. 그렇다면 아래로 정리하세요:\n`
+    + `    select pg_terminate_backend(${rows[0]!.pid});`;
+}
 
 /**
  * 마이그레이션 실행기.
@@ -40,6 +61,7 @@ async function main() {
   }
 
   // 세션 단위 락이라 전용 커넥션이 필요하다(풀에서 매번 다른 커넥션을 받으면 락이 풀린다).
+  console.log('[migrate] DB 연결 중...');
   const client = await pool.connect();
   let locked = false;
   try {
@@ -50,10 +72,22 @@ async function main() {
         applied_at timestamptz not null default now()
       )`);
 
-    await client.query('select pg_advisory_lock($1)', [LOCK_KEY]);
+    // ⚠️ pg_advisory_lock 은 **무한정 기다린다.** lock_timeout 은 여기에 적용되지 않는다
+    //    (그 설정은 테이블 락에만 걸린다). 그래서 try 판을 돌려 직접 시한을 만든다.
+    //    실제로 프록시를 통한 실행이 중간에 끊기면 DB 쪽 세션이 락을 쥔 채 남을 수 있고,
+    //    그때 이 함수가 아무 출력 없이 영원히 멈춰 있었다.
+    console.log('[migrate] 잠금 획득 중...');
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      const got = (await client.query<{ ok: boolean }>(
+        'select pg_try_advisory_lock($1) as ok', [LOCK_KEY],
+      )).rows[0]!.ok;
+      if (got) break;
+      if (Date.now() >= deadline) throw new Error(await lockHolderMessage(client));
+      await new Promise((r) => setTimeout(r, 1000));
+    }
     locked = true;
-    // 막힌 채로 매달려 있지 않게 한다. 배포 중 이전 컨테이너의 조회가 끝나기를 기다리는
-    // 정상적인 대기는 이보다 훨씬 짧다.
+    // 테이블 락(alter table 등)이 막힐 때 무한 대기하지 않게 한다.
     await client.query("set lock_timeout = '15s'");
 
     const applied = new Map<string, string>(
