@@ -1,8 +1,9 @@
 // 계정 인증 라우트 — /v1/auth/*
 //
-// 지금은 이메일 로그인만 붙인다. 애플·구글·카카오·네이버는 "토큰을 검증해서
-// VerifiedIdentity 를 만드는 부분"만 다르고, 그 뒤(계정 찾기·익명 데이터 병합·세션 발급)는
-// 전부 이 파일의 finishSignIn 을 그대로 탄다.
+// 이메일 + 소셜(애플·구글). 프로바이더마다 다른 것은 **토큰을 검증해 VerifiedIdentity 를
+// 만드는 부분**뿐이고(social-tokens.ts), 그 뒤 — 계정 찾기·생성·기기 바인딩·세션 발급 —
+// 은 전부 signIn 과 이 파일의 finishSignIn 을 그대로 탄다.
+// 카카오·네이버도 검증 함수 하나만 늘리면 붙는다.
 //
 // ⚠️ 이 라우트들은 v1 아래 있으므로 **API 키 인증을 이미 통과한 요청**이다.
 //    API 키는 "이 앱이 호출해도 되는가", 여기서 다루는 건 "이 사람이 누구인가"다.
@@ -29,6 +30,13 @@ import {
   verifyPassword,
 } from './password';
 import { type AppEnv, clientIp } from './middleware';
+import {
+  SocialNotConfiguredError,
+  SocialTokenError,
+  type SocialProfile,
+  verifyAppleIdToken,
+  verifyGoogleIdToken,
+} from './social-tokens';
 import { issueSession, revokeAuthorSessions, revokeDeviceSessions, revokeSession } from './sessions';
 
 // 이메일 형식 — 완벽한 RFC 검증은 불가능하고 실익도 없다. 명백한 오타만 걸러내고
@@ -263,6 +271,90 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     });
     return c.json(await finishSignIn(result, deviceId));
   });
+
+  // ── 소셜 로그인 ────────────────────────────────────────────────────────────
+  //  가입과 로그인이 **한 라우트**다. 소셜은 "계정이 있는지"를 사용자가 알 필요가 없고,
+  //  묻는 화면을 두면 이미 가입한 사람이 가입 버튼을 눌러 실패하는 길만 생긴다.
+  //  처음 온 신원이면 계정을 만들고 201, 있던 신원이면 200 이다.
+  async function socialSignIn(
+    c: Context<AppEnv>,
+    provider: 'google' | 'apple',
+    verifyToken: (idToken: string) => Promise<SocialProfile>,
+  ) {
+    // 이메일 로그인과 같은 창을 쓴다. 토큰 검증은 서명 확인이라 값싸지만, 남의 서버(JWKS)를
+    //  때리는 경로가 열려 있으면 그 자체로 증폭 수단이 된다.
+    if (tooManyAttempts(c)) {
+      return c.json({ error: 'too_many_attempts', message: '요청이 많습니다. 잠시 후 다시 시도해주세요.' }, 429);
+    }
+
+    const p = await readBody(c);
+    if (!p) return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
+
+    const idToken = str(p.idToken);
+    const deviceId = str(p.deviceId);
+    // 애플은 이름을 토큰에 담지 않고 **최초 인증 응답에서만** 준다. 앱이 그때 받은 이름을
+    //  여기로 함께 보낸다. 새 계정의 초기 닉네임으로만 쓰인다(signIn 주석 참고).
+    const nickname = str(p.nickname);
+    const accessFeatures = p.accessFeatures === undefined
+      ? undefined
+      : (Array.isArray(p.accessFeatures)
+          ? p.accessFeatures.filter((v): v is string => typeof v === 'string' && v.length <= 40).slice(0, MAX_ACCESS_FEATURES)
+          : []);
+
+    if (!idToken) {
+      return c.json({ error: 'missing_idToken', message: '로그인 토큰이 없습니다.' }, 400);
+    }
+    if (nickname.length > MAX_NICKNAME_LENGTH) {
+      return c.json({ error: 'invalid_nickname', message: `닉네임은 ${MAX_NICKNAME_LENGTH}자 이하여야 합니다.` }, 400);
+    }
+    if (deviceId.length > MAX_DEVICE_ID_LENGTH) {
+      return c.json({ error: 'invalid_deviceId', message: `deviceId 는 ${MAX_DEVICE_ID_LENGTH}자 이하여야 합니다.` }, 400);
+    }
+
+    let profile: SocialProfile;
+    try {
+      profile = await verifyToken(idToken);
+    } catch (error) {
+      if (error instanceof SocialNotConfiguredError) {
+        // 앱 잘못이 아니다. 서버가 클라이언트 ID 를 모르면 검증 자체를 할 수 없고,
+        //  그 상태로 통과시키면 남의 앱 토큰까지 받아 준다(social-tokens.ts 상단).
+        console.error(`[social] ${provider} 미설정 — 로그인 거부:`, (error as Error).message);
+        return c.json({
+          error: 'social_not_configured',
+          message: '지금은 이 방식으로 로그인할 수 없습니다. 이메일로 로그인해주세요.',
+        }, 503);
+      }
+      recordAttempt(c);
+      if (error instanceof SocialTokenError) {
+        return c.json({ error: 'invalid_token', message: '로그인 정보를 확인할 수 없습니다. 다시 시도해주세요.' }, 401);
+      }
+      throw error;
+    }
+
+    const result = await signIn({
+      identity: { provider, subject: profile.subject, email: profile.email },
+      deviceId,
+      // 구글은 토큰에 이름이 있고, 애플은 앱이 보내 준다. 둘 다 없으면 signIn 이 기본값을 쓴다.
+      nickname: nickname || profile.name || '',
+      accessFeatures,
+    });
+
+    // 프로바이더가 이메일 소유를 확인했다고 말하면 우리 계정도 인증된 것으로 본다 —
+    //  그러지 않으면 구글로 가입한 사람에게 앱이 영원히 "이메일 인증 전"을 띄운다.
+    //  markEmailVerified 는 **계정의 이메일이 그 주소와 같을 때만** 찍는다(사용자가 나중에
+    //  주소를 바꿨으면 소셜 응답이 그것을 인증해 줄 근거가 없다).
+    if (profile.email && profile.emailVerified) {
+      await markEmailVerified(result.authorId, profile.email);
+    }
+
+    const body = await finishSignIn(result, deviceId);
+    // 인증 표시는 위에서 방금 바뀔 수 있다 — finishSignIn 이 읽은 값보다 이쪽이 최신이다.
+    if (profile.email && profile.emailVerified) body.author.emailVerified = true;
+    return c.json(body, result.created ? 201 : 200);
+  }
+
+  auth.post('/google', (c) => socialSignIn(c, 'google', verifyGoogleIdToken));
+  auth.post('/apple', (c) => socialSignIn(c, 'apple', verifyAppleIdToken));
 
   // ── 로그아웃 ───────────────────────────────────────────────────────────────
   //  세션 폐기와 기기 바인딩 해제를 **둘 다** 한다. 토큰만 끊고 바인딩을 두면 그 기기의

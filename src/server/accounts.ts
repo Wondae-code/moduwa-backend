@@ -109,6 +109,7 @@ export async function bindDevice(
 export async function signIn(params: {
   identity: VerifiedIdentity;
   deviceId: string;
+  /** **새 계정의 초기 닉네임.** 이미 있는 계정에는 반영하지 않는다(아래 주석 참고). */
   nickname?: string;
   /** 이메일 가입에서만 쓴다. 신원을 **처음 만들 때만** 반영된다(로그인은 비밀번호를 덮지 않는다). */
   passwordHash?: string | null;
@@ -168,9 +169,9 @@ export async function signIn(params: {
         [authorId, identity.email],
       );
     }
-    if (nickname) {
-      await client.query('update authors set nickname = $2 where id = $1', [authorId, nickname]);
-    }
+    // ⚠️ 기존 계정의 닉네임은 **건드리지 않는다.** 여기서 덮으면 소셜로 로그인할 때마다
+    //    프로바이더가 준 이름이 사용자가 직접 고친 닉네임을 되돌린다(accessFeatures 와 같은 함정).
+    //    새 계정의 초기 닉네임은 위 insert 가 이미 정했다.
     // 로그인은 기기의 소유자가 바뀌는 유일한 지점이다 — 여기서만 rebind 를 허용한다.
     if (deviceId) await touchDevice(client, deviceId, authorId, true);
 

@@ -15,6 +15,11 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** 콤마로 구분한 환경변수를 목록으로. 빈 항목은 버린다(`API_KEYS` 와 같은 규칙). */
+function list(name: string): string[] {
+  return (process.env[name] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 export const config = {
   databaseUrl: required('DATABASE_URL'),
 
@@ -90,6 +95,19 @@ export const config = {
     //     뒤에 덧붙인다. 왼쪽을 쓰면 헤더를 매 요청 바꿔 시도 제한을 무한히 우회할 수 있다.
     //  Railway 는 자기 edge 가 마지막에 붙이므로 1 이 맞다. 프록시가 늘면 함께 올릴 것.
     trustedProxyHops: num('TRUSTED_PROXY_HOPS', 1),
+  },
+
+  // ── 소셜 로그인 ──
+  //  ⚠️ 여기 담기는 값은 **비밀이 아니다.** iOS 클라이언트 ID 와 번들 ID 는 앱 바이너리에
+  //     들어 있어 누구나 읽을 수 있다. 그래도 서버가 알아야 하는 이유는 하나다 —
+  //     받은 ID 토큰의 `aud` 가 **우리 앱 것인지** 확인해야 한다(social-tokens.ts 상단 주석).
+  //  비워 두면 그 프로바이더의 로그인은 아예 거부된다(503). "전부 통과"보다 안전한 기본값이다.
+  social: {
+    // 구글 iOS 클라이언트 ID(`...apps.googleusercontent.com`). 쉼표로 여러 개(iOS·안드로이드)를
+    //  둘 수 있다 — 플랫폼별 클라이언트를 따로 만들면 aud 가 서로 다르다.
+    googleAudiences: list('GOOGLE_CLIENT_IDS'),
+    // 네이티브 Sign in with Apple 의 aud = 앱 번들 ID. 웹 플로우를 붙이면 Service ID 도 함께.
+    appleAudiences: list('APPLE_CLIENT_IDS'),
   },
 
   // ── 메일 발송 ──

@@ -80,6 +80,9 @@ const SESSION_OPTIONAL_PATHS = [
   '/v1/auth/email/sign-up',
   '/v1/auth/email/forgot',
   '/v1/auth/email/reset',
+  // 소셜도 같다 — 낡은 토큰이 붙어 있다고 구글/애플 로그인이 막히면 탈출로가 없다.
+  '/v1/auth/google',
+  '/v1/auth/apple',
 ];
 
 export async function sessionAuth(c: Context<AppEnv>, next: Next): Promise<Response | void> {
