@@ -41,6 +41,21 @@ const TYPE_LABEL: Record<string, string> = {
   '32': '숙박', '38': '쇼핑', '39': '음식점',
 };
 
+// ── 식사 시간대. 카카오 세부 분류로 가른다.
+//  ⚠️ **거르지 않고 점수만 조정한다.** 후보가 적은 지역(가평 28곳)에서 거르면 칸이 통째로
+//     비는데, 어울리지 않는 식당이라도 있는 편이 빈 칸보다 낫다.
+const MORNING_WORDS = ['해장국', '국밥', '곰탕', '설렁탕', '죽', '순대', '두부', '국수',
+  '감자탕', '베이커리', '제과', '간식', '분식', '샐러드', '샌드위치', '토스트', '패스트푸드'];
+const EVENING_WORDS = ['육류', '고기', '해물', '생선', '술집', '치킨', '호프', '이자카야',
+  '곱창', '막창', '전골', '사철탕', '영양탕', '횟집', '회'];
+
+function mealTime(cat: string | null): 'morning' | 'evening' | 'any' {
+  if (!cat) return 'any';
+  if (MORNING_WORDS.some((wd) => cat.includes(wd))) return 'morning';
+  if (EVENING_WORDS.some((wd) => cat.includes(wd))) return 'evening';
+  return 'any';
+}
+
 /** 테마 → 장소 유형. 고른 테마와 유형이 맞으면 theme.match 가산. */
 const THEME_TYPES: Record<string, string[]> = {
   camping: ['28'], waterpark: ['28'], photo: ['12', '14'], nature: ['12'],
@@ -104,7 +119,10 @@ type Candidate = {
   hub_rank: number | null; tats_nm: string | null;
   access_infant: boolean; access_wheelchair: boolean; has_image: boolean;
   lcls_systm3: string | null;
-  is_pet_ok: boolean; is_cafe: boolean; tag_hits: number; restdate: string | null;
+  is_pet_ok: boolean; is_cafe: boolean; kakao_cat: string | null; norm_name: string;
+  /** 인기순위 가산점. **관광 슬롯에서만** 더한다 — 아래 주석 참고. */
+  hub_bonus: number;
+  tag_hits: number; restdate: string | null;
   score: number;
 };
 
@@ -151,11 +169,18 @@ async function collectCandidates(
            exists (select 1 from kakao_place k
                     where k.content_id = b.contentid and k.matched
                       and k.category_group_code = 'CE7') as is_cafe,
+           -- 식사 시간대 판단용 세부 분류('음식점 > 한식 > 해장국'). 관광공사 유형에는
+           --  이 정보가 없어 아침 자리에 횟집이 들어갔다(실제로 그랬다).
+           (select k.category_name from kakao_place k
+             where k.content_id = b.contentid and k.matched limit 1) as kakao_cat,
            coalesce((select count(*) from review_tags rt
                        join reviews r on r.id = rt.review_id
                       where r.content_id = b.contentid and rt.tag_code = any($4)), 0)::int as tag_hits,
            (select k.intro_raw->>'restdate' from kor_detail k where k.content_id = b.contentid) as restdate,
-           0::numeric as score
+           -- 018 과 같은 정규화. barrier_free 에는 같은 이름의 다른 contentid 가 있다
+           --  (예: '롯데백화점 본점' 132668 · 2902442). 그대로 두면 한 코스에 같은 곳이 두 번 나온다.
+           regexp_replace(lower(b.title), '[^0-9a-z가-힣]', '', 'g') as norm_name,
+           0::numeric as score, 0::numeric as hub_bonus
       from barrier_free b
      where b.ldong_regn_cd = $1
        and ($2::text is null or b.ldong_signgu_cd = $2)
@@ -169,10 +194,14 @@ async function collectCandidates(
 
   for (const c of rows) {
     let s = neutral;
-    // hub_rank: 있으면 가산, 없으면 **중립**. 등수가 낮을수록 조금 받는다(1위가 최대).
-    if (c.hub_rank != null && c.hub_rank > 0) {
-      s += hubMax * Math.max(0, 1 - Math.log10(c.hub_rank) / 3);
-    }
+    // ⚠️ 인기순위 가산점은 여기서 더하지 않는다 — **관광 슬롯에서만** 쓴다.
+    //  hub_rank 는 "관광 명소로서의 인기" 이고 맛집의 신호가 아니다. 그런데 전통시장은
+    //  관광 명소로 등록돼 순위를 받고 음식점은 대부분 못 받는다. 식사 자리에서 이걸 더하면
+    //  **세 끼가 전부 시장이 된다**(서울에서 실제로 9끼 전부 시장이 나왔다).
+    //  등수가 낮을수록 조금 받는다(1위가 최대, 로그 스케일).
+    c.hub_bonus = (c.hub_rank != null && c.hub_rank > 0)
+      ? hubMax * Math.max(0, 1 - Math.log10(c.hub_rank) / 3)
+      : 0;
     if (c.has_image) s += w.get('base.has_image') ?? 8;
 
     // 동반자 — 1순위 공식 양성 신호
@@ -215,7 +244,16 @@ function distKm(a: Candidate, b: Candidate): number {
 
 function slotTypes(slot: Slot): string[] {
   if (slot === 'spot') return SPOT_TYPES;
-  return [FOOD_TYPE, '38'];   // 음식·쇼핑. 카페 슬롯은 여기에 is_cafe 조건이 더 붙는다
+  // 음식(39) + 쇼핑(38). 쇼핑을 남겨 두는 이유는 두 가지다 —
+  //  ① 전통시장은 실제 식사 목적지다(주문진수산시장·망원시장)
+  //  ② 후보가 적은 지역은 음식점이 몇 곳뿐이다(가평 3곳). 막으면 칸이 통째로 빈다.
+  //  대신 시장이 아닌 쇼핑(백화점·몰)은 아래에서 점수로 크게 민다.
+  return [FOOD_TYPE, '38'];
+}
+
+/** 식사 자리에 어울리는 쇼핑인가 — 전통시장은 되고 백화점·아울렛은 아니다. */
+function isMarket(name: string): boolean {
+  return /시장/.test(name) && !/백화점|아울렛|몰$/.test(name);
 }
 
 /** 이 후보가 그 슬롯에 놓일 수 있는가. 카페만 추가 조건이 있다. */
@@ -316,7 +354,9 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
 
   // ── 날짜별 배치. 혼잡일에는 주요 명소(hub_rank 상위)를 피하고 가벼운 일정을 둔다.
   const used = new Set<string>();
-  if (stay) used.add(stay.contentid);
+  // contentid 와 별개로 **이름**도 막는다. 같은 곳이 다른 id 로 두 번 들어 있기 때문이다.
+  const usedNames = new Set<string>();
+  if (stay) { used.add(stay.contentid); usedNames.add(stay.norm_name); }
   const days: RecommendDay[] = [];
   let thin = false;
 
@@ -326,13 +366,18 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
     const dow = new Date(date).getDay();
     const items: RecommendDay['items'] = [];
     let prev: Candidate | null = stay;
+    // 그날 이미 쓴 유형. 같은 유형이 반복되면 감점한다 — 하루가 통째로 '관광지 4곳' 이 되면
+    //  코스가 단조로워지고, 명세 3번이 경계한 "경쟁 목록처럼 보이는" 문제와 같은 성질이다.
+    const typesToday = new Map<string, number>();
 
     for (const slot of DAY_TEMPLATE) {
       const pick = all
-        .filter((c) => !used.has(c.contentid) && fitsSlot(c, slot))
+        .filter((c) => !used.has(c.contentid) && !usedNames.has(c.norm_name) && fitsSlot(c, slot))
         .filter((c) => !closedWeekdays(c.restdate).has(dow))   // 휴무일 제외
         .map((c) => {
           let s = c.score;
+          // 인기순위는 볼거리를 고를 때만 쓴다(위 주석).
+          if (slot === 'spot') s += c.hub_bonus;
           // 혼잡일 보정 — 유명한 곳일수록 크게 깎는다(hub_rank 가 있는 24% 에만 적용된다)
           if (c.hub_rank != null) {
             s += busy ? -(w.get('congestion.busy_penalty') ?? 15)
@@ -340,13 +385,30 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
           }
           // 이동 거리 — 직전 장소에서 멀수록 감점. Directions 없이 하루 동선을 뭉치는 장치다.
           if (prev) s -= Math.min(30, distKm(prev, c) * 1.5);
+          // 식사 자리의 쇼핑 — 서울처럼 백화점이 인기순위 상위에 몰린 지역에서는
+          //  그대로 두면 세 끼가 전부 백화점이 된다(실제로 그랬다). 시장은 예외로 둔다.
+          if (slot !== 'cafe' && c.contenttypeid === '38' && !isMarket(c.title)) {
+            s += w.get('meal.non_restaurant') ?? -35;
+          }
+          // 식사 시간대 — 아침에 횟집, 저녁에 죽집이 오지 않게. 거르지 않고 점수만 민다.
+          if (slot === 'meal_morning' || slot === 'meal_dinner') {
+            const want = slot === 'meal_morning' ? 'morning' : 'evening';
+            const got = mealTime(c.kakao_cat);
+            if (got === want) s += w.get('meal.time_match') ?? 20;
+            else if (got !== 'any') s += w.get('meal.time_mismatch') ?? -25;
+          }
+          // 다양성 — 그날 같은 유형이 나올 때마다 누적 감점.
+          const seen = typesToday.get(c.contenttypeid) ?? 0;
+          if (seen > 0) s += seen * (w.get('diversity.same_type') ?? -10);
           return { c, s };
         })
         .sort((a, b) => b.s - a.s)[0];
 
       if (!pick) { thin = true; continue; }
       used.add(pick.c.contentid);
+      usedNames.add(pick.c.norm_name);
       prev = pick.c;
+      typesToday.set(pick.c.contenttypeid, (typesToday.get(pick.c.contenttypeid) ?? 0) + 1);
       items.push({
         slot, contentID: pick.c.contentid, name: pick.c.title,
         categoryLabel: pick.c.is_cafe ? '카페' : (TYPE_LABEL[pick.c.contenttypeid] ?? '기타'),
