@@ -134,7 +134,15 @@ create temporary table tmp_bf as
     from barrier_free b
     left join tmp_sgg_alias al
            on al.bf_sgg = left(b.ldong_regn_cd, 2) || right(b.ldong_signgu_cd, 3)
-   where b.title is not null and b.ldong_regn_cd is not null and b.ldong_signgu_cd is not null;
+   where b.title is not null and b.ldong_regn_cd is not null and b.ldong_signgu_cd is not null
+     -- ⚠️ **원천이 비어 있으면 여기서 멈춘다.** tar_rlte_records(357만행)는 로컬 전용이라
+     --    prod 에는 테이블만 있고 비어 있다. 그대로 두면 8단계가 barrier_free 만으로 근접
+     --    폴백을 채워서, prod 의 고품질 결과(실제 동반방문 유래 'rlte')를 **단순 거리순으로
+     --    교체해 버린다.** 데이터가 사라지진 않지만 품질이 조용히 내려앉는 더 나쁜 형태다.
+     --    (prod 의 related_places 는 push-data.sh 가 실어 보낸 것이 소스다)
+     --  tmp_bf 를 비우면 이후 모든 단계가 빈 채로 흘러 **빠르고 안전하다** — 실제로 prod 에서
+     --  이 계산이 10,265곳을 대상으로 몇 분씩 돌고 있었다.
+     and exists (select 1 from tar_rlte_records limit 1);
 create unique index on tmp_bf (contentid);
 create index on tmp_bf (sgg)  where has_image;
 create index on tmp_bf (regn) where has_image;
@@ -348,12 +356,7 @@ select n.contentid as content_id, c.contentid as related_content_id,
 
 -- 10) 최종 적재. 여기서 한 번 더 정규화 이름(k2) 기준 중복을 걷어내고 rank 를 1..N 으로 다시 매긴다
 --     (8·9단계는 배치 안에서 서로를 못 보므로 같은 이름이 한 배치에 두 번 들어올 수 있다).
--- ⚠️ **바꿀 내용이 있을 때만 지운다.**
---  원천인 tar_rlte_records(357만행)는 로컬 전용이라 prod 에는 테이블만 있고 비어 있다.
---  무조건 delete 하면 prod 의 related_places 가 통째로 사라지고 0건이 들어간다 —
---  앱의 '함께 가볼만한 곳' 이 전멸한다(push-data.sh 로 실어 보낸 데이터가 소스다).
---  지금까지는 schema_migrations 가 재실행을 막고 있었을 뿐이고, 이 파일을 한 줄이라도
---  고치면 해시가 바뀌어 prod 에서 실행된다. 그때 지워지지 않게 하는 것이 이 가드다.
+-- ⚠️ 바꿀 내용이 있을 때만 지운다(2단계의 원천 확인과 짝을 이루는 마지막 방어선).
 do $guard$
 begin
   if not exists (select 1 from tmp_pick limit 1) then
