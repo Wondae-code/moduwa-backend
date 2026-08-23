@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
+import { type PartyKind, type RecommendInput, recommend } from './recommend';
 import { query, withTransaction } from '../db';
 import { buildDashboard } from './dashboard';
 import { buildAuthRoutes } from './auth-routes';
@@ -79,6 +80,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/review-tags',
       '🔒 POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm?, tags?, wouldRevisit?, imageURLs?}',
       '🔒 POST /v1/reviews/:reviewId/comments  {body, authorNm?}',
+      '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?}',
       '🔒 GET /v1/plans',
       '🔒 GET /v1/plans/:planId',
       '🔒 PUT /v1/plans/:planId  {authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
@@ -1163,6 +1165,87 @@ export function buildApp(): Hono<AppEnv> {
 
   // 새 플랜 플로우가 그릴 선택지 목록. 인증만 필요하고 사용자별 값이 아니다.
   v1.get('/plan-options', (c) => c.json({ themes: PLAN_THEMES, budgets: PLAN_BUDGETS }))
+
+  // ── AI 추천 코스 ────────────────────────────────────────────────────────────
+  //  기획팀 명세("AI 추천 코스 로직") v1. 점수는 코드가 아니라 recommend_weights 에 있다.
+  //
+  //  ⚠️ 서버에서 계산하는 이유가 세 가지다 — 혼잡도·인기순위·후기태그가 전부 DB 에 있고,
+  //     카카오 키를 앱에 넣을 수 없으며(v2 경로 안내), 가중치를 배포 없이 바꿔야 한다.
+  //  ⚠️ 플랜을 **저장하지 않는다.** 추천은 제안일 뿐이고, 사용자가 고른 뒤 기존
+  //     PUT /v1/plans/:planId 로 저장한다. 추천마다 플랜이 쌓이면 목록이 쓰레기로 찬다.
+  v1.post('/plans/recommend', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    const p = await (async () => {
+      try { return await c.req.json() as Record<string, unknown> } catch { return null }
+    })()
+    if (p === null || typeof p !== 'object' || Array.isArray(p)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400)
+    }
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+    const startDate = str(p.startDate)
+    const endDate = str(p.endDate)
+    const isDate = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v)
+    if (!isDate(startDate) || !isDate(endDate)) {
+      return c.json({ error: 'invalid_date', message: 'startDate·endDate 는 YYYY-MM-DD 여야 합니다.' }, 400)
+    }
+    if (endDate < startDate) {
+      return c.json({ error: 'invalid_date', message: '종료일이 시작일보다 앞설 수 없습니다.' }, 400)
+    }
+    // 기간 상한 — 없으면 한 요청이 후보 전체를 몇십 번 훑는다.
+    const nights = (Date.parse(endDate) - Date.parse(startDate)) / 86400000
+    if (nights > 13) {
+      return c.json({ error: 'invalid_date', message: '추천은 최대 14일까지 지원합니다.' }, 400)
+    }
+
+    const arr = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()) : []
+    const budget = str(p.budget)
+    if (budget && !BUDGET_CODES.has(budget)) {
+      return c.json({ error: 'invalid_budget', message: 'budget 은 low·medium·high 중 하나여야 합니다.' }, 400)
+    }
+    const themes = arr(p.themes)
+    const unknownThemes = themes.filter((t) => !THEME_CODES.has(t))
+    if (unknownThemes.length) {
+      return c.json({
+        error: 'invalid_themes',
+        message: `알 수 없는 테마입니다: ${unknownThemes.join(', ')}. GET /v1/plan-options 로 목록을 확인하세요.`,
+      }, 400)
+    }
+
+    const input: RecommendInput = {
+      region: str(p.region) || undefined,
+      regionCode: str(p.regionCode) || undefined,
+      sigunguCode: str(p.sigunguCode) || undefined,
+      startDate, endDate,
+      party: arr(p.party) as PartyKind[],
+      themes,
+      budget: (budget || undefined) as RecommendInput['budget'],
+      dayTripOnly: p.dayTripOnly === true,
+    }
+    if (!input.region && !input.regionCode) {
+      return c.json({ error: 'missing_region', message: 'region(슬러그) 또는 regionCode 가 필요합니다.' }, 400)
+    }
+
+    const result = await recommend(input)
+    // 후보가 아예 없으면 200 이 아니라 404 다. 빈 코스는 "갈 곳이 없다" 로 읽힌다.
+    if (result && result.notes.includes('empty_pool')) {
+      return c.json({
+        error: 'no_candidates',
+        message: '이 지역에는 추천할 장소가 충분하지 않습니다. 다른 지역을 선택해주세요.',
+        region: result.region,
+      }, 404)
+    }
+    // 알 수 없는 슬러그를 조용히 전국 검색으로 흘리지 않는다 — 엉뚱한 코스가 나가는 것이 더 나쁘다.
+    if (!result) {
+      return c.json({
+        error: 'unknown_region',
+        message: '알 수 없는 지역입니다. regionCode(ldong_regn_cd)로 보내거나 지원 지역을 확인해주세요.',
+      }, 400)
+    }
+    return c.json(result)
+  })
 
   const MAX_PLAN_TITLE = 60
   const MAX_PLAN_DAYS = 60

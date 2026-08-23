@@ -655,6 +655,57 @@ curl -X POST "$BASE/v1/reviews/images" \
 ```
 표시 문구를 앱에 하드코딩하지 않고 서버가 내려보낸다 — 문구가 바뀔 때 앱 재배포 대신 서버 배포로 끝난다.
 
+### POST /v1/plans/recommend — AI 추천 코스  🔒
+
+기획팀 명세("AI 추천 코스 로직") v1. **플랜을 저장하지 않습니다** — 제안만 돌려주고, 사용자가
+고르면 앱이 기존 `PUT /v1/plans/:planId` 로 저장합니다.
+
+| 필드 | 필수 | 설명 |
+|---|---|---|
+| `region` 또는 `regionCode` | ✅ | 슬러그(`gangneung`) 또는 `ldong_regn_cd`(`51`). 슬러그 목록은 `region_slugs` |
+| `sigunguCode` | | `regionCode`와 함께 쓸 때 시군구까지 좁힘 |
+| `startDate`/`endDate` | ✅ | `YYYY-MM-DD`, **최대 14일** |
+| `party` | | `kids`·`pet`·`elderly`·`couple`·`friends`·`solo` |
+| `themes` | | `GET /v1/plan-options`의 테마 코드. 목록 밖은 **400** |
+| `budget` | | `low`·`medium`·`high` — 숙소 가격대 |
+| `dayTripOnly` | | `true`면 숙소를 고르지 않음 |
+
+```json
+{
+  "region": "강릉",
+  "stay": { "contentID": "…", "name": "세인트존스 호텔", "imageURL": "…" },
+  "days": [{
+    "date": "2026-09-01", "congestion": 27.7, "busy": false,
+    "items": [
+      { "slot": "meal_morning", "contentID": "…", "name": "…", "categoryLabel": "음식점",
+        "imageURL": "…", "latitude": 37.79, "longitude": 128.91 }
+    ]
+  }],
+  "notes": []
+}
+```
+
+**하루 템플릿(`slot`)** — 명세 3번: `meal_morning` · `spot` · `meal_lunch` · `spot` · `spot` · `cafe` · `meal_dinner` · `spot`
+
+**`notes`** — 결과가 어떻게 조정됐는지 앱이 안내 문구를 띄우는 근거입니다.
+
+| 값 | 뜻 |
+|---|---|
+| `budget_fallback` | 고른 가격대에 숙소가 없어 인접 가격대로 확장 |
+| `budget_ignored` | 그래도 없어 가격대 없이 골랐음 — **배지를 숨기고 안내 문구 필요** |
+| `no_congestion_data` | 여행일이 혼잡도 예측 범위 밖 (현재 약 2.5개월치만 보유) |
+| `thin_pool` | 후보가 적어 일부 슬롯이 비었음 |
+
+**오류**: `missing_region` · `unknown_region`(400) · `no_candidates`(404, 그 지역에 후보 없음) · `invalid_date` · `invalid_themes` · `invalid_budget`
+
+> **`congestion`은 4곳 중 1곳만 값이 있습니다.** 혼잡도는 이름+시군구로만 우리 장소와
+> 이어지는데 전국 "기준 관광지"가 6,574곳뿐이라 음식점·쇼핑·숙박은 대상이 아닙니다.
+> **없으면 중립**으로 다루고 불이익을 주지 않습니다(`hub_rank`도 같은 24% 커버리지).
+
+> **경로 안내는 v1에 없습니다.** 하루 안의 순서는 직선거리로 뭉치고, 카카오 Directions는
+> 확정된 일정에만 붙일 예정입니다(v2). 그때도 **자동차 경로**라 도보 안내가 아님을 UI에
+> 표시해야 합니다.
+
 ### GET /v1/plans — 내 플랜 목록
 최근 여행부터. **본문(`days`)은 싣지 않는다** — 목록 카드에 필요 없다.
 ```json
