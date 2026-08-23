@@ -37,6 +37,7 @@ import {
   type SocialProfile,
   verifyAppleIdToken,
   verifyGoogleIdToken,
+  verifyKakaoIdToken,
 } from './social-tokens';
 import { issueSession, revokeAuthorSessions, revokeDeviceSessions, revokeSession } from './sessions';
 
@@ -279,7 +280,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
   //  처음 온 신원이면 계정을 만들고 201, 있던 신원이면 200 이다.
   async function socialSignIn(
     c: Context<AppEnv>,
-    provider: 'google' | 'apple',
+    provider: 'google' | 'apple' | 'kakao',
     verifyToken: (idToken: string) => Promise<SocialProfile>,
   ) {
     // 이메일 로그인과 같은 창을 쓴다. 토큰 검증은 서명 확인이라 값싸지만, 남의 서버(JWKS)를
@@ -295,6 +296,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const deviceId = str(p.deviceId);
     // 애플은 이름을 토큰에 담지 않고 **최초 인증 응답에서만** 준다. 앱이 그때 받은 이름을
     //  여기로 함께 보낸다. 새 계정의 초기 닉네임으로만 쓰인다(signIn 주석 참고).
+    //  (구글은 토큰의 name, 카카오는 nickname 에 이름이 들어 있어 이 값이 없어도 된다)
     const nickname = str(p.nickname);
     const accessFeatures = p.accessFeatures === undefined
       ? undefined
@@ -335,7 +337,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const result = await signIn({
       identity: { provider, subject: profile.subject, email: profile.email },
       deviceId,
-      // 구글은 토큰에 이름이 있고, 애플은 앱이 보내 준다. 둘 다 없으면 signIn 이 기본값을 쓴다.
+      // 구글·카카오는 토큰에 이름이 있고, 애플은 앱이 보내 준다. 없으면 signIn 이 기본값을 쓴다.
       nickname: nickname || profile.name || '',
       accessFeatures,
     });
@@ -356,6 +358,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
 
   auth.post('/google', (c) => socialSignIn(c, 'google', verifyGoogleIdToken));
   auth.post('/apple', (c) => socialSignIn(c, 'apple', verifyAppleIdToken));
+  auth.post('/kakao', (c) => socialSignIn(c, 'kakao', verifyKakaoIdToken));
 
   // ── 로그아웃 ───────────────────────────────────────────────────────────────
   //  세션 폐기와 기기 바인딩 해제를 **둘 다** 한다. 토큰만 끊고 바인딩을 두면 그 기기의

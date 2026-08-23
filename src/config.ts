@@ -108,6 +108,11 @@ export const config = {
     googleAudiences: list('GOOGLE_CLIENT_IDS'),
     // 네이티브 Sign in with Apple 의 aud = 앱 번들 ID. 웹 플로우를 붙이면 Service ID 도 함께.
     appleAudiences: list('APPLE_CLIENT_IDS'),
+    // 카카오 ID 토큰의 aud = **앱 키**다(클라이언트 ID 가 아니다).
+    //  SDK 로그인은 네이티브 앱 키, REST 로그인은 REST API 키가 들어온다. 둘 다 쓰면 쉼표로.
+    //  ⚠️ 카카오는 OIDC 를 **켜야** id_token 을 준다. 콘솔에서 활성화하지 않으면 앱이 받는 것은
+    //     access_token 뿐이고, 이 경로는 아예 시작되지 않는다(문서 참고).
+    kakaoAudiences: list('KAKAO_APP_KEYS'),
   },
 
   // ── 메일 발송 ──

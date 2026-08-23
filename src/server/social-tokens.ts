@@ -1,4 +1,4 @@
-// 소셜 로그인 토큰 검증 — 애플·구글이 준 ID 토큰이 진짜인지, 그리고 **우리 앱에 발급된
+// 소셜 로그인 토큰 검증 — 애플·구글·카카오가 준 ID 토큰이 진짜인지, 그리고 **우리 앱에 발급된
 // 것인지** 확인한다. 이 파일만 프로바이더를 안다(mailer.ts 가 메일 provider 를 혼자 아는 것과 같다).
 //
 // 검증이 끝나면 accounts.signIn 이 이메일 로그인과 **똑같은 길**을 탄다 —
@@ -36,10 +36,12 @@ export class SocialTokenError extends Error {}
 //  맡는다 — 요청마다 받아오면 로그인이 남의 서버 응답 시간에 묶인다.
 const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 const appleKeys = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
+const kakaoKeys = createRemoteJWKSet(new URL('https://kauth.kakao.com/.well-known/jwks.json'));
 
 // 구글은 두 형태를 모두 발급해 왔다. 둘 다 받는다.
 const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'];
 const APPLE_ISSUER = 'https://appleid.apple.com';
+const KAKAO_ISSUER = 'https://kauth.kakao.com';
 
 /**
  * `email_verified` 는 불리언으로 오기도 하고 문자열 `"true"` 로 오기도 한다(애플).
@@ -87,7 +89,9 @@ async function verify(
     email,
     // 이메일이 없으면 인증 여부를 말할 것도 없다.
     emailVerified: email != null && claimIsTrue(payload.email_verified),
-    name: claimString(payload.name),
+    // 카카오는 표시 이름을 `name` 이 아니라 `nickname` 에 담는다. 둘 다 본다 —
+    //  구글·애플은 nickname 을 보내지 않으므로 부작용이 없다.
+    name: claimString(payload.name) ?? claimString(payload.nickname),
   };
 }
 
@@ -110,4 +114,23 @@ export function verifyGoogleIdToken(idToken: string): Promise<SocialProfile> {
  */
 export function verifyAppleIdToken(idToken: string): Promise<SocialProfile> {
   return verify(idToken, appleKeys, APPLE_ISSUER, config.social.appleAudiences, 'apple');
+}
+
+/**
+ * 카카오 ID 토큰 검증.
+ *
+ * `aud` 는 **앱 키**다(구글의 클라이언트 ID 와 다른 개념). SDK 로그인이면 네이티브 앱 키,
+ * REST 로그인이면 REST API 키가 들어온다.
+ *
+ * ⚠️ **카카오는 OIDC 를 켜야 id_token 을 준다.** 콘솔에서 활성화하지 않았거나 앱이 `openid`
+ *    스코프를 요청하지 않으면 access_token 만 돌아오고 이 경로는 시작조차 되지 않는다.
+ *    "로그인은 되는데 서버가 토큰이 없다고 한다" 는 대부분 이 문제다.
+ *
+ * ⚠️ 이메일은 **인증된 것으로 보지 않는다.** 카카오 ID 토큰에는 email_verified 에 해당하는
+ *    클레임이 없고, 카카오계정에는 미인증 이메일이 존재할 수 있다. 확인되지 않은 주소를
+ *    인증 표시해 두면 그 표시가 거짓말이 된다 — 우리 이메일 인증(6자리 코드)으로 확인받는다.
+ *    (혹시 카카오가 나중에 그 클레임을 넣으면 공통 verify 가 알아서 반영한다)
+ */
+export function verifyKakaoIdToken(idToken: string): Promise<SocialProfile> {
+  return verify(idToken, kakaoKeys, KAKAO_ISSUER, config.social.kakaoAudiences, 'kakao');
 }

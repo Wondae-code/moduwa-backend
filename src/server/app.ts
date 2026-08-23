@@ -97,6 +97,8 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/posts/:postId/comments',
       '🔒 POST /v1/posts/:postId/comments  {body, authorNm?}',
       '',
+      'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
+      '',
       '🔒 = X-Session-Token 필요. POST /v1/auth/email/sign-up · sign-in 으로 발급.',
       ...(config.dashboard.password ? ['GET /dashboard  (수집 현황 대시보드 — 비밀번호 로그인)'] : []),
     ],
