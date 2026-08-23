@@ -348,6 +348,19 @@ select n.contentid as content_id, c.contentid as related_content_id,
 
 -- 10) 최종 적재. 여기서 한 번 더 정규화 이름(k2) 기준 중복을 걷어내고 rank 를 1..N 으로 다시 매긴다
 --     (8·9단계는 배치 안에서 서로를 못 보므로 같은 이름이 한 배치에 두 번 들어올 수 있다).
+-- ⚠️ **바꿀 내용이 있을 때만 지운다.**
+--  원천인 tar_rlte_records(357만행)는 로컬 전용이라 prod 에는 테이블만 있고 비어 있다.
+--  무조건 delete 하면 prod 의 related_places 가 통째로 사라지고 0건이 들어간다 —
+--  앱의 '함께 가볼만한 곳' 이 전멸한다(push-data.sh 로 실어 보낸 데이터가 소스다).
+--  지금까지는 schema_migrations 가 재실행을 막고 있었을 뿐이고, 이 파일을 한 줄이라도
+--  고치면 해시가 바뀌어 prod 에서 실행된다. 그때 지워지지 않게 하는 것이 이 가드다.
+do $guard$
+begin
+  if not exists (select 1 from tmp_pick limit 1) then
+    raise notice '[018] 계산 결과가 비어 기존 related_places 를 유지합니다';
+    return;
+  end if;
+
 delete from related_places;
 insert into related_places (content_id, related_content_id, rank, source)
 select content_id, related_content_id, rank, source
@@ -364,5 +377,6 @@ select content_id, related_content_id, rank, source
   ) z
  where rank <= 10
  order by content_id, rank;
+end $guard$;
 
 analyze related_places;

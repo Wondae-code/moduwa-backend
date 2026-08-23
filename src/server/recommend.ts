@@ -302,12 +302,12 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
   }
   const cong = new Map<string, number>();
   if (dates.length) {
-    const rows = (await query<{ ymd: string; rate: string }>(`
-      select base_ymd as ymd, avg(cnctr_rate)::numeric(6,2) as rate
-        from tats_cnctr
-       where signgu_cd like $1 and base_ymd = any($2)
-       group by 1`,
-      [`${region.regn}%`, dates.map((d) => d.replace(/-/g, ''))],
+    // 미리 집계한 tats_region_daily 를 읽는다(036). 예전에는 요청마다 tats_cnctr 66만 행을
+    //  훑었고, 그 테이블은 440MB 라 prod 로 옮길 수도 없어 혼잡도가 항상 null 이었다.
+    //  ⚠️ regn 을 앞 2자리로 자른다 — 세종만 ldong_regn_cd 가 '36110'(5자리)이다(018·034 참고).
+    const rows = (await query<{ ymd: string; rate: string }>(
+      'select base_ymd as ymd, rate from tats_region_daily where regn_cd = $1 and base_ymd = any($2)',
+      [region.regn.slice(0, 2), dates.map((d) => d.replace(/-/g, ''))],
     )).rows;
     for (const r of rows) {
       cong.set(`${r.ymd.slice(0, 4)}-${r.ymd.slice(4, 6)}-${r.ymd.slice(6, 8)}`, Number(r.rate));
@@ -323,10 +323,9 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
   //  그래서 그 지역이 **평소 얼마나 붐비는지**의 분포에서 임계를 잡는다.
   const pct = (w.get('congestion.threshold') ?? 70) / 100;
   const busyCut = (await query<{ cut: string | null }>(
-    `select percentile_cont($2) within group (order by r)::numeric(6,2) as cut
-       from (select base_ymd, avg(cnctr_rate) r from tats_cnctr
-              where signgu_cd like $1 group by 1) x`,
-    [`${region.regn}%`, pct],
+    `select percentile_cont($2) within group (order by rate)::numeric(6,2) as cut
+       from tats_region_daily where regn_cd = $1`,
+    [region.regn.slice(0, 2), pct],
   )).rows[0]?.cut;
   const busyThreshold = busyCut == null ? Infinity : Number(busyCut);
 

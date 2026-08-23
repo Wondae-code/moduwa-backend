@@ -30,7 +30,16 @@ set -euo pipefail
 #     그 원천 테이블이 없다. 즉 prod 에서 npm run migrate 로 재계산하는 것은 불가능하고
 #     (relation "tar_rlte_records" does not exist), 계산 결과를 데이터로 실어 보내는 길밖에 없다.
 #     → barrier_free 를 갱신했으면 로컬에서 018 을 재실행한 뒤 이 스크립트를 돌린다.
-TABLES="pet_tour_poi pet_tour_detail kor_with_detail kor_detail locgo_hub_detail barrier_free related_places"
+#  ✅ kakao_place · tats_region_daily 도 반드시 포함한다 — 추천(035·036)이 요청 시점에 읽는다.
+#     없으면 prod 추천이 조용히 열등해진다: 혼잡도가 항상 null 이고, 카페 슬롯에 순두부집이,
+#     아침 자리에 횟집이 들어간다(실제로 그 상태로 배포돼 있었다).
+#     · kakao_place       34MB. 카페 판별(CE7)과 식사 시간대(세부 분류)의 유일한 출처.
+#     · tats_region_daily 1,300여 행. tats_cnctr(440MB)를 지역·날짜별 평균으로 미리 집계한 것.
+#
+#  ❌ 반대로 tats_cnctr(440MB)·locgo_hub_records(394MB)는 **보내지 않는다.**
+#     요청 시점에 읽히지 않는다. 전자는 위 집계로 대체되고, 후자의 결과인 hub_rank 는
+#     barrier_free 컬럼에 실려 함께 간다.
+TABLES="pet_tour_poi pet_tour_detail kor_with_detail kor_detail locgo_hub_detail barrier_free related_places kakao_place tats_region_daily"
 DUMP="/tmp/moduwa-slim-$(date +%Y%m%d%H%M%S).sql"
 trap 'rm -f "$DUMP"' EXIT
 
