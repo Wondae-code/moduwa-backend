@@ -592,6 +592,19 @@ curl -X POST "$BASE/v1/reviews" \
 }
 ```
 
+### PUT · DELETE /v1/reviews/:reviewId/like — 후기 좋아요  🔒
+
+게시글 좋아요와 같은 규칙. 멱등이다(PUT 두 번 눌러도 +1, 없는 좋아요 DELETE 도 200).
+
+```json
+{ "reviewId": 1, "likedByMe": true, "likeCount": 43 }
+```
+
+- 목록·상세 응답의 `likedByMe` 는 **보는 사람(세션)** 기준이다 — 비로그인이면 전부 false.
+- `likeCount` 는 `reviews.like_count` 컬럼이다. 시연 시드값을 버리지 않고 그 위에 ±1 누적한다
+  (post_likes 처럼 0 부터 세면 시드 좋아요가 사라지고 '좋아요 순' 정렬 인덱스도 못 쓴다).
+- 오류: `invalid_reviewId`(400) · `not_found`(404) · `login_required`(401)
+
 ### POST /v1/reviews/:reviewId/comments — 댓글 작성
 작성자 식별은 리뷰 작성과 **같은 규칙**이다 — 기기 UUID + 닉네임, 처음 쓰는 기기면 `authorNm` 필수.
 

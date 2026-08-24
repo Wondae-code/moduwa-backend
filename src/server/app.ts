@@ -94,6 +94,8 @@ export function buildApp(): Hono<AppEnv> {
       '🔒 DELETE /v1/posts/:postId',
       '🔒 PUT /v1/posts/:postId/like',
       '🔒 DELETE /v1/posts/:postId/like',
+      '🔒 PUT /v1/reviews/:reviewId/like',
+      '🔒 DELETE /v1/reviews/:reviewId/like',
       'GET /v1/posts/:postId/comments',
       '🔒 POST /v1/posts/:postId/comments  {body, authorNm?}',
       '',
@@ -557,10 +559,16 @@ export function buildApp(): Hono<AppEnv> {
   // 리뷰 목록/단건 공통 select.
   //  ⚠️ authors.device_id 는 사실상 신원 토큰이므로 절대 select 하지 않는다.
   //  author_review_count 는 작성자별 총 리뷰 수(레벨 파생용). author_id 가 없으면 0.
-  const REVIEW_SELECT = `
+  // 보는 사람 파라미터 번호를 받는다(게시글 postSelect 와 같은 방식). count 쿼리는 이 SELECT 를
+  //  쓰지 않아 viewer 가 필요 없으므로, 번호를 고정($1)하지 않고 호출부가 정하게 한다.
+  const reviewSelect = (viewer: number) => `
     select r.id, r.content_id as "contentId", r.location_nm as location,
            r.author_nm as author, r.body, r.rating,
            r.like_count as "likeCount", r.comment_count as "commentCount",
+           -- 보는 사람이 좋아요했는지. 비로그인이면 그 파라미터가 null 이라 exists 가 늘 false 다
+           --  (장소상세에서 하트가 눌린 상태로 그려지려면 이게 필요하다).
+           exists (select 1 from review_likes rl
+                    where rl.review_id = r.id and rl.author_id = $${viewer}) as "likedByMe",
            r.is_accessibility_verified as "isAccessibilityVerified",
            r.image_urls as "imageURLs",
            r.would_revisit as "wouldRevisit",
@@ -611,17 +619,22 @@ export function buildApp(): Hono<AppEnv> {
     const sort = c.req.query('sort') ?? 'recommended';
     const order = REVIEW_ORDERS[sort] ?? REVIEW_ORDERS.recommended;
     const where: string[] = [];
-    const params: unknown[] = [];
+    // 필터 파라미터는 $1 부터(count 와 SELECT 가 공유). 보는 사람은 **맨 뒤**에 붙여
+    //  SELECT 에만 쓴다 — count 는 review_likes 를 보지 않아 viewer 가 필요 없다.
+    const filters: unknown[] = [];
     const contentId = c.req.query('contentId');
-    if (contentId) { params.push(contentId); where.push(`r.content_id = $${params.length}`); }
+    if (contentId) { filters.push(contentId); where.push(`r.content_id = $${filters.length}`); }
     // 시안의 "사진/영상 후기만 보기". image_urls 가 null 인 행도 있어 coalesce 로 감싼다.
     if (c.req.query('hasImage') === 'true') where.push('coalesce(array_length(r.image_urls, 1), 0) > 0');
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
 
-    // count 도 같은 별칭(r)을 써서 wsql 을 그대로 공유한다.
-    const total = (await query<{ n: number }>(`select count(*)::int n from reviews r ${wsql}`, params)).rows[0]!.n;
+    // count: 필터만.
+    const total = (await query<{ n: number }>(
+      `select count(*)::int n from reviews r ${wsql}`, filters)).rows[0]!.n;
+    // SELECT: 필터 + 맨 뒤 viewer.
+    const params = [...filters, authorOf(c)];
     const rows = (await query<ReviewRow>(
-      `${REVIEW_SELECT} ${wsql} order by ${order} limit ${limit} offset ${offset}`, params,
+      `${reviewSelect(params.length)} ${wsql} order by ${order} limit ${limit} offset ${offset}`, params,
     )).rows;
     return c.json({ total, limit, offset, sort, count: rows.length, items: rows.map(shapeReview) });
   });
@@ -871,7 +884,8 @@ export function buildApp(): Hono<AppEnv> {
       return inserted.id;
     });
 
-    const row = (await query<ReviewRow>(`${REVIEW_SELECT} where r.id = $1`, [newId])).rows[0]!;
+    const row = (await query<ReviewRow>(
+      `${reviewSelect(2)} where r.id = $1`, [newId, gate.authorId])).rows[0]!;
     return c.json(shapeReview(row), 201);
   });
 
@@ -1816,6 +1830,41 @@ export function buildApp(): Hono<AppEnv> {
 
   v1.put('/posts/:postId/like', (c) => setPostLike(c, true))
   v1.delete('/posts/:postId/like', (c) => setPostLike(c, false))
+
+  // ── 후기 좋아요(038) ─────────────────────────────────────────────────────────
+  //  게시글과 같은 규칙이되, like_count 컬럼을 캐시로 두고 ±1 한다(038 주석).
+  const setReviewLike = async (c: Context, liked: boolean) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    const reviewId = c.req.param('reviewId') ?? ''
+    // reviews.id 는 bigserial(정수)다. 숫자가 아니면 bigint 캐스팅에서 터지므로 먼저 막는다.
+    if (!/^\d+$/.test(reviewId)) {
+      return c.json({ error: 'invalid_reviewId', message: 'reviewId 는 숫자여야 합니다.' }, 400)
+    }
+    const exists = (await query('select 1 from reviews where id = $1', [reviewId])).rowCount
+    if (!exists) return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404)
+
+    if (liked) {
+      // 실제로 삽입됐을 때만(중복 좋아요가 아닐 때만) 카운트를 올린다.
+      const r = await query(
+        `insert into review_likes (review_id, author_id) values ($1, $2)
+         on conflict (review_id, author_id) do nothing`, [reviewId, gate.authorId])
+      if (r.rowCount) await query('update reviews set like_count = like_count + 1 where id = $1', [reviewId])
+    } else {
+      const r = await query(
+        'delete from review_likes where review_id = $1 and author_id = $2', [reviewId, gate.authorId])
+      // 시드값 위에 누적하므로 0 밑으로는 내려가지 않게 막는다.
+      if (r.rowCount) await query('update reviews set like_count = greatest(like_count - 1, 0) where id = $1', [reviewId])
+    }
+
+    const count = (await query<{ n: number }>(
+      'select like_count as n from reviews where id = $1', [reviewId])).rows[0]!.n
+    return c.json({ reviewId: Number(reviewId), likedByMe: liked, likeCount: count })
+  }
+
+  v1.put('/reviews/:reviewId/like', (c) => setReviewLike(c, true))
+  v1.delete('/reviews/:reviewId/like', (c) => setReviewLike(c, false))
 
   // ── 게시글 댓글 ─────────────────────────────────────────────────────────────
 
