@@ -35,11 +35,14 @@ set -euo pipefail
 #     아침 자리에 횟집이 들어간다(실제로 그 상태로 배포돼 있었다).
 #     · kakao_place       34MB. 카페 판별(CE7)과 식사 시간대(세부 분류)의 유일한 출처.
 #     · tats_region_daily 1,300여 행. tats_cnctr(440MB)를 지역·날짜별 평균으로 미리 집계한 것.
+#     · unsurveyed_dining  8,489행(2MB). 무장애 조사를 받지 않은 음식점 — 소도시의 식사 자리를
+#       채운다. 원천 kor_poi(187MB)를 039 가 추려 굳힌 것이다. 없으면 가평 같은 곳의 코스가
+#       절반만 채워진다(칸이 비는 것이라 에러가 나지 않아 알아채기 어렵다).
 #
 #  ❌ 반대로 tats_cnctr(440MB)·locgo_hub_records(394MB)는 **보내지 않는다.**
 #     요청 시점에 읽히지 않는다. 전자는 위 집계로 대체되고, 후자의 결과인 hub_rank 는
 #     barrier_free 컬럼에 실려 함께 간다.
-TABLES="pet_tour_poi pet_tour_detail kor_with_detail kor_detail locgo_hub_detail barrier_free related_places kakao_place tats_region_daily"
+TABLES="pet_tour_poi pet_tour_detail kor_with_detail kor_detail locgo_hub_detail barrier_free related_places kakao_place tats_region_daily unsurveyed_dining"
 DUMP="/tmp/moduwa-slim-$(date +%Y%m%d%H%M%S).sql"
 trap 'rm -f "$DUMP"' EXIT
 

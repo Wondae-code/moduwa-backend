@@ -199,7 +199,9 @@ async function collectCandidates(
     -- ── 무장애 조사를 받지 **않은** 음식점. 식사·카페 자리에만 쓴다.
     --  왜 필요한가: 병목은 볼거리가 아니라 먹는 자리다. 가평은 볼거리가 20곳인데
     --  무장애 등록 식당이 **1곳**이라 2박 일정의 아홉 끼를 채울 수 없었다(실측).
-    --  kor_poi 로 넓히면 78곳이 된다. 새로 수집할 것은 없다 — 이미 갖고 있던 데이터다.
+    --  넓히면 78곳이 된다. 새로 수집할 것은 없다 — 이미 갖고 있던 데이터다.
+    --  원천은 kor_poi(187MB)인데 추천이 쓰는 것은 9천여 행뿐이라 039 가 추려 굳혀 둔다.
+    --  그래야 관리형 DB 로 실어 보낼 수 있다(push-data.sh).
     --
     --  ⚠️ 볼거리·숙소는 넓히지 않는다. 그쪽은 부족하지 않고, 접근성을 모르는 곳을
     --     코스 전반에 섞으면 무장애 앱의 약속이 무너진다. 확장은 최소 범위로 묶는다.
@@ -207,11 +209,11 @@ async function collectCandidates(
     --     사용자가 조사된 곳으로 오해한다.
     --  hub_rank·혼잡도·무장애 플래그는 이쪽에 없다 — 전부 중립값이고, 그래도 되는 이유는
     --  "모르는 것에 벌점을 주지 않는다"는 이 파일의 원칙 그대로다.
-    select p.content_id as contentid, p.title, p.content_type_id as contenttypeid,
+    select p.content_id as contentid, p.title, '39' as contenttypeid,
            p.addr1, p.firstimage,
            p.mapx, p.mapy, null::integer as hub_rank, null::text as tats_nm,
            false as access_infant, false as access_wheelchair, false as access_elderly,
-           true as has_image, p.lcls_systm3,
+           true as has_image, null::text as lcls_systm3,
            false as is_pet_ok,
            exists (select 1 from kakao_place k
                     where k.content_id = p.content_id and k.matched
@@ -225,14 +227,9 @@ async function collectCandidates(
            regexp_replace(lower(p.title), '[^0-9a-z가-힣]', '', 'g') as norm_name,
            false as has_access_info,
            0::numeric as score, 0::numeric as hub_bonus
-      from kor_poi p
-     where p.service = 'kor'
-       and p.content_type_id = '39'
-       and p.ldong_regn_cd = $1
+      from unsurveyed_dining p
+     where p.ldong_regn_cd = $1
        and ($2::text is null or p.ldong_signgu_cd = $2)
-       and nullif(p.firstimage, '') is not null
-       -- 무장애에 이미 있는 곳은 위 갈래에서 나온다. 두 번 담으면 같은 곳이 코스에 두 번 뜬다.
-       and not exists (select 1 from barrier_free b where b.contentid = p.content_id)
   `, [region.regn, region.signgu, [...wantTypes], tagCodes.length ? tagCodes : ['__none__']])).rows;
 
   const neutral = w.get('base.neutral') ?? 50;
