@@ -31,13 +31,14 @@
 | 국문 관광정보(KorService2) | `ingest:kor` | `kor_poi` | 전국 POI |
 | 무장애 여행(KorWithService2) | `ingest:korwith` | `kor_poi(service=korwith)` | |
 | KorService2 상세 | `ingest:kordetail` | `kor_detail` | 개요·운영시간(가볼곳 유형) |
-| 무장애 상세 | `ingest:withdetail` | `kor_with_detail` | 28속성(휠체어·안내견 등) |
+| 무장애 상세 | `ingest:withdetail` | `kor_with_detail` | 28속성(휠체어·안내견 등) → 5유형 플래그로 파생 |
 | 카카오 로컬 보강 | `ingest:kakao`, `ingest:locgo-detail` | `locgo_hub_detail`, `kakao_place` | 전화·업종·지도링크·사진 |
 | **반려동물 동반여행(KorPetTour)** | `ingest:pet`, `ingest:pet-detail` | `pet_tour_poi`, `pet_tour_detail` | 동반유형·동반가능동물 |
 
 ### API가 노출하는 것 (슬림)
-- `barrier_free` — **앱의 핵심 데이터셋.** 무장애 여행 장소 10,248곳 + 무장애 28속성(자유 텍스트). `kor_detail` 조인으로 개요·기본정보까지 상세에 붙는다
-- `related_places` — "함께 가볼만한 곳" 연관 장소 102,330쌍. 위 10,248곳 **전부**가 추천 3장 이상을 갖는다
+- `barrier_free` — **앱의 핵심 데이터셋.** 무장애 여행 장소 10,265곳 + 무장애 28속성(자유 텍스트). `kor_detail` 조인으로 개요·기본정보까지 상세에 붙는다
+  - 28속성을 **관광공사 공식 5유형**으로 묶은 플래그를 함께 낸다 — 지체 9,272 · 시각 3,431 · 청각 107 · 영유아 3,000 · **고령자 6,231**. `access=` 필터와 카드 배지가 이 값을 쓴다([docs/barrier-free-detail-fields.md](docs/barrier-free-detail-fields.md))
+- `related_places` — "함께 가볼만한 곳" 연관 장소 102,503쌍. 위 10,265곳 **전부**가 추천 3장 이상을 갖는다
 - `reviews` / `authors` — 여행자 후기. TourAPI에 없는 자체 데이터이고 **유일하게 쓰기가 가능한 리소스**다
 - `pet_friendly_view` — 반려동물 동반 관광지 9,767곳 + 안내견(무장애) + 개요·운영시간을 `content_id`로 결합
 - `locgo_hub_detail` — 지역 대표 관광지 54,478곳(카카오/네이버 지도링크 100% + TourAPI 소개·사진 + 카카오 전화·업종)
