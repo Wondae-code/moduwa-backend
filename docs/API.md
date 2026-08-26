@@ -312,7 +312,7 @@ GET /v1/pet-friendly/1019041
 
 ### GET /v1/barrier-free — 무장애 여행 장소 목록
 
-**접근성 그룹 필터** — `access=wheelchair,visual,hearing,infant` (콤마 구분).
+**접근성 그룹 필터** — `access=wheelchair,visual,hearing,infant·elderly` (콤마 구분).
 
 **AND 다.** 휠체어도 필요하고 유아 동반도 하는 사람에게 둘 중 하나만 되는 곳은 갈 수 있는
 곳이 아니다. OR 로 두면 휠체어(9,270곳)가 결과를 삼켜 필터가 무의미해진다.
@@ -421,7 +421,7 @@ GET /v1/pet-friendly/1019041
     "region": "서울 종로구",
     "firstimage": "https://tong.visitkorea.or.kr/...jpg",
     "mapx": 126.9769, "mapy": 37.5796,
-    "access": { "wheelchair": true, "visual": true, "hearing": false, "infant": true }
+    "access": { "wheelchair": true, "visual": true, "hearing": false, "infant": true, "elderly": true }
   }]
 }
 ```

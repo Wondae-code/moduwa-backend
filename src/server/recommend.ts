@@ -117,7 +117,7 @@ type Candidate = {
   addr1: string | null; firstimage: string | null;
   mapx: number | null; mapy: number | null;
   hub_rank: number | null; tats_nm: string | null;
-  access_infant: boolean; access_wheelchair: boolean; has_image: boolean;
+  access_infant: boolean; access_wheelchair: boolean; access_elderly: boolean; has_image: boolean;
   lcls_systm3: string | null;
   is_pet_ok: boolean; is_cafe: boolean; kakao_cat: string | null; norm_name: string;
   /** 인기순위 가산점. **관광 슬롯에서만** 더한다 — 아래 주석 참고. */
@@ -162,7 +162,7 @@ async function collectCandidates(
   const rows = (await query<Candidate>(`
     select b.contentid, b.title, b.contenttypeid, b.addr1, b.firstimage,
            b.mapx, b.mapy, b.hub_rank, b.tats_nm,
-           b.access_infant, b.access_wheelchair, b.has_image, b.lcls_systm3,
+           b.access_infant, b.access_wheelchair, b.access_elderly, b.has_image, b.lcls_systm3,
            exists (select 1 from pet_tour_poi p where p.contentid = b.contentid) as is_pet_ok,
            -- 카페 슬롯은 카카오 분류(CE7)로 고른다. 관광공사 유형에는 '카페' 가 없어서
            --  음식(39)에서 아무거나 고르면 순두부집이 카페 자리에 들어간다(실제로 그랬다).
@@ -208,7 +208,9 @@ async function collectCandidates(
     for (const p of party) {
       if (p === 'kids' && c.access_infant) s += w.get('party.official_positive') ?? 25;
       if (p === 'pet' && c.is_pet_ok) s += w.get('party.official_positive') ?? 25;
-      if (p === 'elderly' && c.access_wheelchair) s += w.get('party.accessibility') ?? 20;
+      // 효도여행은 예전에 지체 접근성(access_wheelchair)으로 근사했는데, 그러면
+      //  "고령자 = 휠체어" 가 된다. 037 이 관광공사 5번째 유형을 되살렸으므로 그것을 쓴다.
+      if (p === 'elderly' && c.access_elderly) s += w.get('party.accessibility') ?? 20;
     }
     // 2순위 후기 태그 — 상한을 둔다. 없으면 후기 많은 유명지가 전부 밀어낸다.
     if (c.tag_hits > 0) s += Math.min(tagCap, c.tag_hits * (w.get('party.review_tag') ?? 15));

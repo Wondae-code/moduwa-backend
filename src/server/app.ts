@@ -222,7 +222,8 @@ export function buildApp(): Hono<AppEnv> {
     braileblock, helpdog, guidehuman, audioguide, bigprint, brailepromotion, guidesystem, blindhandicapetc,
     signguide, videoguide, hearingroom, hearinghandicapetc,
     stroller, lactationroom, babysparechair, infantsfamilyetc,
-    has_image, has_access`;
+    has_image, has_access,
+    access_wheelchair, access_visual, access_hearing, access_infant, access_elderly`;
 
   // 무장애 28속성 중 몇 개가 채워져 있는지. 값은 전부 자유 텍스트고 빈 문자열 없이 null 뿐이라
   // null 여부만 세면 된다. 정보가 풍부한 장소일수록 접근성 판단에 쓸모가 있으므로 기본 정렬 키다.
@@ -242,15 +243,17 @@ export function buildApp(): Hono<AppEnv> {
   /**
    * 접근성 그룹 이름 → 컬럼(015). 앱의 `AccessibilityFeature` 중 **서버가 아는 것만** 있다.
    *
-   * 고령자 친화(`elderly`)가 없는 것은 빠뜨린 게 아니다 — 관광공사 원본에 그 축이 없고,
-   * 휠체어로 근사하면 "고령자 친화 = 휠체어"라는 틀린 말이 데이터에 박힌다. 새 축을 만들려면
-   * 28개 속성 중 무엇이 고령자 친화인지 정하고 ingest 에서 다시 계산해야 한다(별도 작업).
+   * ⚠️ 이 주석은 예전에 "관광공사 원본에 고령자 축이 없다" 고 적혀 있었는데 **틀린 말이었다.**
+   * 열린관광의 공식 분류는 5개 유형이고 다섯째가 고령자다(037 주석). 컬럼 이름에 elder 가
+   * 없어서 없다고 판단했을 뿐, 데이터는 wheelchair 컬럼에 들어 있었다.
+   * 지금은 access_elderly 로 계산해 다른 넷과 나란히 쓴다.
    */
   const ACCESS_GROUP_COLUMNS: Record<string, string> = {
     wheelchair: 'access_wheelchair',
     visual: 'access_visual',
     hearing: 'access_hearing',
     infant: 'access_infant',
+    elderly: 'access_elderly',
   };
 
   /**
@@ -278,6 +281,12 @@ export function buildApp(): Hono<AppEnv> {
       + (hearingroom is not null)::int + (hearinghandicapetc is not null)::int)`,
     infant: `((stroller is not null)::int + (lactationroom is not null)::int
       + (babysparechair is not null)::int + (infantsfamilyetc is not null)::int)`,
+    // 고령자는 전용 속성 묶음이 없어 판정에 쓴 네 항목을 그대로 센다(037).
+    //  다른 그룹과 달리 지체 축과 속성이 겹치는데, 그래도 되는 이유는 이 점수가
+    //  "고른 축의 충실도" 일 뿐 배타적 분류가 아니기 때문이다.
+    elderly: `((wheelchair is not null)::int + (elevator is not null)::int
+      + (parking is not null)::int
+      + (handicapetc ~ '이동보조|전동스쿠터|스쿠터|보행보조')::int)`,
   };
 
   v1.get('/barrier-free', async (c) => {
@@ -429,10 +438,11 @@ export function buildApp(): Hono<AppEnv> {
       contentid: string; title: string | null; addr1: string | null;
       firstimage: string | null; contenttypeid: string | null;
       has_access: boolean | null; access_wheelchair: boolean | null; access_visual: boolean | null;
-      access_hearing: boolean | null; access_infant: boolean | null;
+      access_hearing: boolean | null; access_infant: boolean | null; access_elderly: boolean | null;
       rank: number; source: string;
     }>(`select b.contentid, b.title, b.addr1, b.firstimage, b.contenttypeid,
                b.has_access, b.access_wheelchair, b.access_visual, b.access_hearing, b.access_infant,
+               b.access_elderly,
                r.rank, r.source
           from related_places r
           join barrier_free b on b.contentid = r.related_content_id
@@ -458,6 +468,8 @@ export function buildApp(): Hono<AppEnv> {
           visual: r.access_visual,
           hearing: r.access_hearing,
           infant: r.access_infant,
+          // 관광공사 5번째 유형(037). 휠체어 대여·이동보조기기·승강기·주차 중 하나라도 있으면 켠다.
+          elderly: r.access_elderly,
         },
         rank: r.rank,
         source: r.source,
@@ -511,10 +523,11 @@ export function buildApp(): Hono<AppEnv> {
       contentid: string; title: string | null; contenttypeid: string | null;
       addr1: string | null; firstimage: string | null;
       mapx: number | null; mapy: number | null;
-      access_wheelchair: boolean; access_visual: boolean; access_hearing: boolean; access_infant: boolean;
+      access_wheelchair: boolean; access_visual: boolean; access_hearing: boolean;
+      access_infant: boolean; access_elderly: boolean;
     }>(
       `select contentid, title, contenttypeid, addr1, firstimage, mapx, mapy,
-              access_wheelchair, access_visual, access_hearing, access_infant
+              access_wheelchair, access_visual, access_hearing, access_infant, access_elderly
          from barrier_free ${wsql}
         order by case
             when lower(title) = lower($2)     then 0
@@ -538,6 +551,7 @@ export function buildApp(): Hono<AppEnv> {
       access: {
         wheelchair: r.access_wheelchair, visual: r.access_visual,
         hearing: r.access_hearing, infant: r.access_infant,
+        elderly: r.access_elderly,
       },
     }));
     return c.json({ total, limit, offset, count: items.length, items });
