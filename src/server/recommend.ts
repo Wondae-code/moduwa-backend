@@ -110,6 +110,7 @@ export type RecommendNote =
   | 'budget_ignored'               // 그래도 없어 가격대 없이 전체 숙박을 노출했다
   | 'no_congestion_data'           // 여행일이 혼잡도 예측 범위 밖이다
   | 'thin_pool'                    // 후보가 적어 일부 슬롯을 채우지 못했다
+  | 'includes_unsurveyed'          // 무장애 조사를 받지 않은 식당·카페가 섞였다(hasAccessInfo=false)
   | 'empty_pool';                  // 이 지역에 쓸 후보가 사실상 없다 — 빈 코스를 내보내지 않는다
 
 type Candidate = {
@@ -120,6 +121,11 @@ type Candidate = {
   access_infant: boolean; access_wheelchair: boolean; access_elderly: boolean; has_image: boolean;
   lcls_systm3: string | null;
   is_pet_ok: boolean; is_cafe: boolean; kakao_cat: string | null; norm_name: string;
+  /**
+   * 무장애 조사를 받은 곳인가. false 면 접근성을 **모르는** 것이지 나쁘다는 뜻이 아니다.
+   * 식사·카페 슬롯에만 false 가 섞인다(아래 collectCandidates 주석).
+   */
+  has_access_info: boolean;
   /** 인기순위 가산점. **관광 슬롯에서만** 더한다 — 아래 주석 참고. */
   hub_bonus: number;
   tag_hits: number; restdate: string | null;
@@ -180,12 +186,53 @@ async function collectCandidates(
            -- 018 과 같은 정규화. barrier_free 에는 같은 이름의 다른 contentid 가 있다
            --  (예: '롯데백화점 본점' 132668 · 2902442). 그대로 두면 한 코스에 같은 곳이 두 번 나온다.
            regexp_replace(lower(b.title), '[^0-9a-z가-힣]', '', 'g') as norm_name,
+           true as has_access_info,
            0::numeric as score, 0::numeric as hub_bonus
       from barrier_free b
      where b.ldong_regn_cd = $1
        and ($2::text is null or b.ldong_signgu_cd = $2)
        and b.contenttypeid = any($3)
        and b.has_image                       -- 카드에 쓸 사진이 없으면 추천 화면이 비어 보인다
+
+    union all
+
+    -- ── 무장애 조사를 받지 **않은** 음식점. 식사·카페 자리에만 쓴다.
+    --  왜 필요한가: 병목은 볼거리가 아니라 먹는 자리다. 가평은 볼거리가 20곳인데
+    --  무장애 등록 식당이 **1곳**이라 2박 일정의 아홉 끼를 채울 수 없었다(실측).
+    --  kor_poi 로 넓히면 78곳이 된다. 새로 수집할 것은 없다 — 이미 갖고 있던 데이터다.
+    --
+    --  ⚠️ 볼거리·숙소는 넓히지 않는다. 그쪽은 부족하지 않고, 접근성을 모르는 곳을
+    --     코스 전반에 섞으면 무장애 앱의 약속이 무너진다. 확장은 최소 범위로 묶는다.
+    --  ⚠️ has_access_info=false 로 표시해 응답까지 그대로 흘려보낸다. 조용히 섞으면
+    --     사용자가 조사된 곳으로 오해한다.
+    --  hub_rank·혼잡도·무장애 플래그는 이쪽에 없다 — 전부 중립값이고, 그래도 되는 이유는
+    --  "모르는 것에 벌점을 주지 않는다"는 이 파일의 원칙 그대로다.
+    select p.content_id as contentid, p.title, p.content_type_id as contenttypeid,
+           p.addr1, p.firstimage,
+           p.mapx, p.mapy, null::integer as hub_rank, null::text as tats_nm,
+           false as access_infant, false as access_wheelchair, false as access_elderly,
+           true as has_image, p.lcls_systm3,
+           false as is_pet_ok,
+           exists (select 1 from kakao_place k
+                    where k.content_id = p.content_id and k.matched
+                      and k.category_group_code = 'CE7') as is_cafe,
+           (select k.category_name from kakao_place k
+             where k.content_id = p.content_id and k.matched limit 1) as kakao_cat,
+           coalesce((select count(*) from review_tags rt
+                       join reviews r on r.id = rt.review_id
+                      where r.content_id = p.content_id and rt.tag_code = any($4)), 0)::int as tag_hits,
+           (select k.intro_raw->>'restdate' from kor_detail k where k.content_id = p.content_id) as restdate,
+           regexp_replace(lower(p.title), '[^0-9a-z가-힣]', '', 'g') as norm_name,
+           false as has_access_info,
+           0::numeric as score, 0::numeric as hub_bonus
+      from kor_poi p
+     where p.service = 'kor'
+       and p.content_type_id = '39'
+       and p.ldong_regn_cd = $1
+       and ($2::text is null or p.ldong_signgu_cd = $2)
+       and nullif(p.firstimage, '') is not null
+       -- 무장애에 이미 있는 곳은 위 갈래에서 나온다. 두 번 담으면 같은 곳이 코스에 두 번 뜬다.
+       and not exists (select 1 from barrier_free b where b.contentid = p.content_id)
   `, [region.regn, region.signgu, [...wantTypes], tagCodes.length ? tagCodes : ['__none__']])).rows;
 
   const neutral = w.get('base.neutral') ?? 50;
@@ -261,6 +308,9 @@ function isMarket(name: string): boolean {
 /** 이 후보가 그 슬롯에 놓일 수 있는가. 카페만 추가 조건이 있다. */
 function fitsSlot(c: Candidate, slot: Slot): boolean {
   if (!slotTypes(slot).includes(c.contenttypeid)) return false;
+  // 무장애 조사를 받지 않은 곳은 **식사·카페 자리에만** 들어간다. 볼거리는 부족하지 않으므로
+  //  굳이 접근성을 모르는 곳을 섞을 이유가 없다(collectCandidates 주석).
+  if (!c.has_access_info && slot === 'spot') return false;
   if (slot === 'cafe') return c.is_cafe;
   if (c.is_cafe) return false;   // 식사 슬롯에 카페가 들어가지 않게
   return true;
@@ -270,8 +320,16 @@ export type RecommendDay = {
   date: string;
   congestion: number | null;      // 그날 지역 평균 혼잡도(백분위). null = 데이터 없음
   busy: boolean;
-  items: { slot: Slot; contentID: string; name: string; categoryLabel: string;
-           imageURL: string | null; latitude: number | null; longitude: number | null }[];
+  items: {
+    slot: Slot; contentID: string; name: string; categoryLabel: string;
+    imageURL: string | null; latitude: number | null; longitude: number | null;
+    /**
+     * 무장애 조사를 받은 곳인가. **false 는 "접근성이 나쁘다"가 아니라 "모른다"** 다.
+     * 앱은 이 값이 false 인 카드에 조사되지 않았음을 표시해야 한다 — 조용히 섞으면
+     * 사용자가 조사된 곳으로 오해하고, 그것이 무장애 앱에서 가장 나쁜 거짓말이다.
+     */
+    hasAccessInfo: boolean;
+  }[];
 };
 
 export type RecommendResult = {
@@ -386,6 +444,10 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
           }
           // 이동 거리 — 직전 장소에서 멀수록 감점. Directions 없이 하루 동선을 뭉치는 장치다.
           if (prev) s -= Math.min(30, distKm(prev, c) * 1.5);
+          // 무장애 조사를 받은 곳을 먼저 쓴다. 막지 않고 뒤로 미는 것이다 —
+          //  가평처럼 조사된 식당이 1곳뿐인 지역에서 그 한 곳이 첫 끼에 쓰이고,
+          //  나머지 여덟 끼를 조사되지 않은 곳이 채운다. 우선순위가 뒤바뀌지 않게 한다.
+          if (!c.has_access_info) s += w.get('access.unsurveyed') ?? -18;
           // 식사 자리의 쇼핑 — 서울처럼 백화점이 인기순위 상위에 몰린 지역에서는
           //  그대로 두면 세 끼가 전부 백화점이 된다(실제로 그랬다). 시장은 예외로 둔다.
           if (slot !== 'cafe' && c.contenttypeid === '38' && !isMarket(c.title)) {
@@ -411,6 +473,7 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
       prev = pick.c;
       typesToday.set(pick.c.contenttypeid, (typesToday.get(pick.c.contenttypeid) ?? 0) + 1);
       items.push({
+        hasAccessInfo: pick.c.has_access_info,
         slot, contentID: pick.c.contentid, name: pick.c.title,
         categoryLabel: pick.c.is_cafe ? '카페' : (TYPE_LABEL[pick.c.contenttypeid] ?? '기타'),
         imageURL: pick.c.firstimage,
@@ -420,6 +483,7 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
     days.push({ date, congestion: rate, busy, items });
   }
   if (thin) notes.push('thin_pool');
+  if (days.some((d) => d.items.some((i) => !i.hasAccessInfo))) notes.push('includes_unsurveyed');
 
   return {
     region: region.label,

@@ -717,7 +717,8 @@ curl -X POST "$BASE/v1/reviews/images" \
     "date": "2026-09-01", "congestion": 27.7, "busy": false,
     "items": [
       { "slot": "meal_morning", "contentID": "…", "name": "…", "categoryLabel": "음식점",
-        "imageURL": "…", "latitude": 37.79, "longitude": 128.91 }
+        "imageURL": "…", "latitude": 37.79, "longitude": 128.91,
+        "hasAccessInfo": true }
     ]
   }],
   "notes": []
@@ -739,12 +740,30 @@ curl -X POST "$BASE/v1/reviews/images" \
 | `budget_ignored` | 그래도 없어 가격대 없이 골랐음 — **배지를 숨기고 안내 문구 필요** |
 | `no_congestion_data` | 여행일이 혼잡도 예측 범위 밖 (현재 약 2.5개월치만 보유) |
 | `thin_pool` | 후보가 적어 일부 슬롯이 비었음 |
+| `includes_unsurveyed` | 무장애 조사를 받지 않은 식당·카페가 섞였음 (아래 참고) |
 
 **오류**: `missing_region` · `unknown_region`(400) · `no_candidates`(404, 그 지역에 후보 없음) · `invalid_date` · `invalid_themes` · `invalid_budget`
 
 > **`congestion`은 4곳 중 1곳만 값이 있습니다.** 혼잡도는 이름+시군구로만 우리 장소와
 > 이어지는데 전국 "기준 관광지"가 6,574곳뿐이라 음식점·쇼핑·숙박은 대상이 아닙니다.
 > **없으면 중립**으로 다루고 불이익을 주지 않습니다(`hub_rank`도 같은 24% 커버리지).
+
+#### `hasAccessInfo` — 무장애 조사 여부
+
+**`false`는 "접근성이 나쁘다"가 아니라 "모른다"입니다.** 무장애 조사를 받지 않은 곳입니다.
+
+소도시는 무장애 등록 식당만으로 일정을 채울 수 없습니다. 가평은 볼거리가 20곳인데 등록
+식당이 **1곳**이라 2박 일정의 아홉 끼를 채울 수 없었습니다(실측). 그래서 **식사·카페 자리에
+한해** 국문관광정보의 음식점까지 후보로 씁니다 — 가평 기준 1곳 → 78곳.
+
+- **볼거리·숙소에는 섞이지 않습니다.** 그쪽은 부족하지 않고, 접근성을 모르는 곳을 코스
+  전반에 섞으면 앱의 약속이 무너집니다.
+- **조사된 곳이 먼저 쓰입니다.** 모자란 만큼만 채웁니다. 강릉·서울은 `hasAccessInfo: false`가
+  하나도 나오지 않습니다.
+- 코스에 하나라도 섞이면 `notes`에 `includes_unsurveyed`가 붙습니다.
+
+> ⚠️ **앱은 `hasAccessInfo: false`인 카드에 조사되지 않았음을 표시해야 합니다.** 조용히 섞으면
+> 사용자가 조사된 곳으로 오해하고, 그것이 무장애 앱에서 가장 나쁜 거짓말입니다.
 
 > **경로 안내는 v1에 없습니다.** 하루 안의 순서는 직선거리로 뭉치고, 카카오 Directions는
 > 확정된 일정에만 붙일 예정입니다(v2). 그때도 **자동차 경로**라 도보 안내가 아님을 UI에
