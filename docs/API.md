@@ -787,10 +787,17 @@ curl -X POST "$BASE/v1/reviews/images" \
   "items": [
     { "id": "…", "kind": "stop", "place": { "contentID": "126508", "name": "황리단길",
       "categoryLabel": "관광명소", "category": null, "region": "경주시내",
-      "imageURL": null, "latitude": 35.83, "longitude": 129.21 } },
+      "imageURL": null, "latitude": 35.83, "longitude": 129.21,
+      "hasAccessInfo": true } },
     { "id": "…", "kind": "memo", "text": "점심은 여기서" }
   ] }] }
 ```
+
+> **`place.hasAccessInfo` 는 읽기 전용입니다.** 저장 요청에 실을 필요가 없고, 보내도 무시합니다.
+> 서버가 `contentID` 로 매번 도출합니다 — 정의 자체가 "무장애 조사 대상에 있는가" 이기 때문입니다.
+> 컬럼에 굳히지 않는 이유는 두 가지입니다: ① 이미 저장된 플랜도 값을 갖게 되고
+> ② 관광공사가 나중에 그 장소를 조사하면 자동으로 `true` 로 바뀝니다(굳히면 "정보 없음" 이
+> 영구히 박힙니다). **`false` 는 "접근 불가" 가 아니라 "모른다" 입니다.**
 
 ### PUT /v1/plans/:planId — 플랜 저장 (생성 + 수정)
 `planId`는 **클라이언트가 만든 UUID**다. 생성과 수정이 같은 요청이라 앱이 "새 플랜인지" 따질 필요가 없다.

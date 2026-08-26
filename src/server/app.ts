@@ -1056,7 +1056,17 @@ export function buildApp(): Hono<AppEnv> {
       `select d.id as day_id, to_char(d.date, 'YYYY-MM-DD') as day_date, d.position as day_position,
               i.id as item_id, i.position as item_position, i.kind, i.memo_text,
               i.content_id, i.place_name, i.category_label, i.category, i.region,
-              i.image_url, i.latitude, i.longitude
+              i.image_url, i.latitude, i.longitude,
+              -- 무장애 조사를 받은 곳인가. **저장하지 않고 조회 시점에 도출한다.**
+              --  정의 자체가 "barrier_free 에 있는가" 이므로 컬럼에 굳힐 이유가 없고,
+              --  굳히면 두 가지가 나빠진다 —
+              --   ① 이미 저장된 플랜은 값이 없어 배지를 그릴 수 없다(백필해도 결국 이 식이다)
+              --   ② 관광공사가 나중에 그 장소를 조사하면 저장값이 낡는다. "정보 없음" 이
+              --      영구히 박힌다.
+              --  ⚠️ false 는 "접근 불가" 가 아니라 "모른다" 다(recommend.ts hasAccessInfo 주석).
+              (i.content_id is not null
+               and exists (select 1 from barrier_free b where b.contentid = i.content_id)
+              ) as has_access_info
          from plan_days d
          left join plan_items i on i.day_id = d.id
         where d.plan_id = $1
@@ -1078,6 +1088,7 @@ export function buildApp(): Hono<AppEnv> {
                 categoryLabel: r.category_label, category: r.category,
                 region: r.region, imageURL: r.image_url,
                 latitude: r.latitude, longitude: r.longitude,
+                hasAccessInfo: r.has_access_info,
               },
             },
       );
