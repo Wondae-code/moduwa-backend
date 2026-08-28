@@ -393,7 +393,17 @@ GET /v1/pet-friendly/1019041
 
 > ⚠️ 이 라우트와 아래 상세 라우트는 `access` 요약 객체를 내려보내지 **않는다.** 클라이언트가 28개 텍스트 필드를 직접 그룹핑해야 한다. 배지용 boolean 요약(`access.wheelchair` 등)이 필요하면 `/v1/search` 와 `/v1/barrier-free/:contentId/related` 응답에 들어 있다.
 
-### GET /v1/barrier-free/:contentId — 장소 상세
+### GET /v1/barrier-free/:contentId
+
+**`kakaoPlaceUrl`** — 카카오맵 **장소 상세** 링크(`https://place.map.kakao.com/…`). 좌표 링크는
+핀만 찍혀 리뷰·사진·길찾기로 이어지지 않으므로 이 값을 우선 여세요.
+매칭된 곳이 **8,567 / 10,266(83%)** 이고, 없으면 `null` 이라 좌표 링크로 폴백하면 됩니다.
+
+> **이미지·링크 URL 은 서버가 `https` 로 올려 보냅니다.** 원본이 http 인 것이 섞여 있어
+> (TourAPI 이미지 http 3,999 · https 4,237 / 카카오 링크는 전부 http) iOS ATS 가 막아
+> 사진이 조용히 안 뜨는 문제가 있었습니다. 앱에서 다시 처리할 필요 없습니다.
+> 목록·검색·관련장소 응답에도 같은 정규화가 적용됩니다.
+ — 장소 상세
 목록과 같은 필드에 `kor_detail`을 조인해 개요·홈페이지·전화·기본정보를 덧붙인다. 없는 `contentId`는 `404 {"error":"not_found"}`.
 
 ```json
@@ -437,7 +447,13 @@ GET /v1/pet-friendly/1019041
   검색 결과를 플랜 일정에 담거나 지도에 찍을 때 쓴다 — 없으면 클라이언트가 상세를 한 번 더 불러야 한다
 - `access`: 접근성 배지 — 이동(wheelchair)·시각(visual)·청각(hearing)·영유아(infant) 정보 보유 여부
 
-### GET /v1/barrier-free/:contentId/related — 함께 가볼만한 곳
+### GET /v1/barrier-free/:contentId/related
+
+> **`rank` 를 그대로 따라 정렬하세요.** `source`(`rlte`/`nearby`)는 유래를 알려주는 참고값이지
+> 품질 순서가 아닙니다. 앱에서 `rlte` 를 위로 올리면 서버 판단을 뒤집게 됩니다 —
+> 실제로 `rlte` 쪽이 더 멀고(중위 6.7km vs 근접 2.5km) 유형도 덜 맞았습니다.
+> 두 계약(`source`·`rank`)은 계속 유지됩니다.
+ — 함께 가볼만한 곳
 장소 상세 하단 캐러셀용. `related_places`(018)에 미리 계산해 둔 연관 장소를 `rank` 순으로 반환한다.
 추천은 전부 무장애 장소(`barrier_free`) 안에 있어 카드를 누르면 `/v1/barrier-free/:contentId` 상세로 이어진다.
 

@@ -359,7 +359,11 @@ export function buildApp(): Hono<AppEnv> {
     const rows = (await query(
       `select ${BF_COLS} from barrier_free ${wsql} order by ${orderBy} limit ${limit} offset ${offset}`, orderParams,
     )).rows;
-    return c.json({ total, limit, offset, count: rows.length, sort, items: rows });
+    // ⚠️ 목록도 이미지를 https 로 올린다. 홈 피드가 이 응답을 쓰므로 여기가 A14 의 주 무대다.
+    const items = (rows as Record<string, unknown>[]).map((r) => ({
+      ...r, firstimage: toHttps(r.firstimage), firstimage2: toHttps(r.firstimage2),
+    }));
+    return c.json({ total, limit, offset, count: items.length, sort, items });
   });
 
   // TourAPI 텍스트 정리: <br> → ' / ', 태그 제거, 엔티티·공백 정리
@@ -417,8 +421,20 @@ export function buildApp(): Hono<AppEnv> {
     }>('select overview, homepage, tel, intro_raw from kor_detail where content_id = $1', [id])).rows[0];
 
     const info = basicInfoFrom(detail?.intro_raw, base.contenttypeid as string | null);
+
+    // 카카오맵 **장소 상세** 링크. 좌표 링크(map.kakao.com/link/map/...)는 핀만 찍혀서
+    //  리뷰·사진·길찾기로 이어지지 않는다. 매칭된 곳은 83%(8,567/10,266)이고, 없으면 null 이라
+    //  앱이 좌표 링크로 폴백한다.
+    const kakao = (await query<{ place_url: string | null }>(
+      `select place_url from kakao_place
+        where content_id = $1 and matched and nullif(place_url, '') is not null limit 1`, [id],
+    )).rows[0];
+
     return c.json({
       ...base,
+      firstimage: toHttps(base.firstimage),
+      firstimage2: toHttps(base.firstimage2),
+      kakaoPlaceUrl: toHttps(kakao?.place_url),
       overview: detail?.overview?.trim() || null,
       homepage: extractUrl(detail?.homepage),
       tel: cleanIntroText(detail?.tel) ?? info.infocenter,
@@ -460,7 +476,7 @@ export function buildApp(): Hono<AppEnv> {
         // 카드의 "경북 경주시" 자리. 원본 주소도 함께 내려 클라이언트가 고를 수 있게 한다.
         region: shortRegion(r.addr1),
         addr1: r.addr1,
-        imageURL: r.firstimage || null,
+        imageURL: toHttps(r.firstimage),
         category: r.contenttypeid ? CATEGORY_LABELS[r.contenttypeid] ?? null : null,
         hasAccess: r.has_access,
         access: {
@@ -476,6 +492,22 @@ export function buildApp(): Hono<AppEnv> {
       })),
     });
   });
+
+  /**
+   * 외부 URL 을 https 로 올린다.
+   *
+   * ⚠️ **iOS ATS 가 평문 http 를 막는다.** TourAPI 이미지가 http 3,999 · https 4,237 로 섞여
+   *    있어서 절반의 장소에서 사진이 조용히 안 떴다(앱 A14 의 원인). 카카오 place_url 은
+   *    39,802건 **전부** http 다.
+   *    두 호스트 모두 https 로 200 을 준다(확인함) — 서버에서 올려 보내면 앱이 처리할 일이 없다.
+   *    ⚠️ 다른 호스트까지 무조건 바꾸지는 않는다. https 를 지원하지 않는 곳이면 링크가 깨진다.
+   */
+  const HTTPS_SAFE_HOSTS = /^http:\/\/(tong\.visitkorea\.or\.kr|place\.map\.kakao\.com|.*\.daumcdn\.net)\//;
+  const toHttps = (url: unknown): string | null => {
+    if (typeof url !== 'string' || !url.trim()) return null;
+    const u = url.trim();
+    return HTTPS_SAFE_HOSTS.test(u) ? u.replace(/^http:/, 'https:') : u;
+  };
 
   // ILIKE 패턴 메타문자 이스케이프 (사용자 입력 검색어용)
   const escapeLike = (s: string) => s.replace(/[\\%_]/g, '\\$&');
@@ -544,7 +576,7 @@ export function buildApp(): Hono<AppEnv> {
       contenttypeid: r.contenttypeid,
       category: (r.contenttypeid && CATEGORY_LABELS[r.contenttypeid]) || null,
       region: shortRegion(r.addr1),
-      firstimage: r.firstimage || null,
+      firstimage: toHttps(r.firstimage),
       // 목록·상세와 같은 표기 — mapx=경도, mapy=위도. 원본에 좌표가 없는 장소는 null 이다.
       mapx: r.mapx,
       mapy: r.mapy,

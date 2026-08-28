@@ -241,17 +241,44 @@ create temporary table tmp_rlte_edge as
 
 -- 7) rlte 후보 상위 10. barrier_free 에 동명이인(같은 title, 다른 contentid)이 있어 캐러셀에
 --    같은 이름이 두 번 보이는 일이 있었다 → 정규화 이름(k2) 기준으로 1건만 남긴다.
+--
+-- ⚠️ **유형 위생을 rlte 에도 적용한다(2026-08-26 추가).** 8단계(근접 폴백)에는 진작 있었는데
+--    이쪽은 관광공사 연관관광지 순위를 그대로 써서, 볼거리 앵커에 쇼핑·음식이 17.6% 나 섞였다
+--    (근접 폴백은 2.1%). 실제로 이런 카드가 나갔다 —
+--      해운대수목원 → 신세계백화점 센텀시티점 · 신세계사이먼 아울렛 · 롯데프리미엄아울렛 ·
+--                     부산새벽시장 · 롯데백화점 부산본점 · 충무동 새벽시장 (전부 rlte)
+--    부산 관광객이 통계상 둘 다 방문하는 것은 사실이지만 "함께 가볼만한 곳" 카드로는 아니다.
+--    기획 피드백 "뜨는 장소들이 생뚱맞다" 의 실제 원인이 이것이었다.
+--
+--    거리도 함께 본다. rlte 는 중위 6.7km · 14% 가 20km 초과인데(근접은 2.5km · 2.6%),
+--    동반방문 통계라 멀 수 있는 것은 맞다. 그래서 **자르지 않고 순위만 뒤로 민다** —
+--    가까운 좋은 후보가 있으면 그쪽이 앞에 오고, 없으면 먼 것이라도 쓴다.
 drop table if exists tmp_pick;
 create temporary table tmp_pick as
   select content_id, related_content_id, rn as rank, 'rlte'::text as source
     from (
       select d.content_id, d.related_content_id,
-             row_number() over (partition by d.content_id order by d.rk, d.related_content_id) as rn
+             row_number() over (partition by d.content_id order by d.pri, d.rk, d.related_content_id) as rn
         from (
           select e.content_id, e.related_content_id, e.rk,
+                 -- 유형 위생 + 거리. 8단계의 pri 와 같은 사고방식이다.
+                 (case
+                    -- 볼거리 앵커에 쇼핑이 오는 것이 가장 나쁘다(백화점·아울렛 도배)
+                    when a.contenttypeid in ('12','14','15','28') and t.contenttypeid = '38' then 30
+                    when a.contenttypeid in ('12','14','15','28') and t.contenttypeid = '39' then 20
+                    -- 볼거리끼리는 우대
+                    when a.contenttypeid in ('12','14','15','28')
+                     and t.contenttypeid in ('12','14','15','28') then 0
+                    else 10
+                  end)
+                 + (case when a.coord_ok and t.coord_ok then
+                      least(20, floor(sqrt(power((t.mapx-a.mapx)*cos(radians((a.mapy+t.mapy)/2))*111.32,2)
+                                         + power((t.mapy-a.mapy)*110.57,2)) / 5)::int)
+                    else 4 end) as pri,
                  row_number() over (partition by e.content_id, t.k2 order by e.rk, e.related_content_id) as dedup
             from tmp_rlte_edge e
             join tmp_bf t on t.contentid = e.related_content_id
+            join tmp_bf a on a.contentid = e.content_id
         ) d
        where d.dedup = 1
     ) z
