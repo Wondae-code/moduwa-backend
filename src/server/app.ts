@@ -180,9 +180,10 @@ export function buildApp(): Hono<AppEnv> {
     const store = config.web.appStoreUrl;
     const body = state === 'ok'
       ? `<p class="m">여행 플랜에 초대받으셨어요.</p>
-         <p class="s">모두와 앱의 <b>플랜 → 초대 코드 입력</b>에서 아래 코드를 입력해주세요.</p>
+         <a class="btn" href="moduwa://i/${raw}">앱에서 열기</a>
+         <p class="s">버튼이 동작하지 않으면 모두와 앱의<br><b>플랜 → 초대 코드 입력</b>에 아래 코드를 넣어주세요.</p>
          <div class="code">${raw.slice(0, 4)}-${raw.slice(4)}</div>
-         ${store ? `<a class="btn" href="${store}">앱 받기</a>` : ''}`
+         ${store ? `<a class="btn2" href="${store}">앱 받기</a>` : ''}`
       : state === 'expired'
         ? `<p class="m">초대가 만료되었어요.</p>
            <p class="s">초대 코드는 30분 동안만 유효해요.<br>초대한 분에게 새 코드를 요청해주세요.</p>`
@@ -203,7 +204,9 @@ export function buildApp(): Hono<AppEnv> {
   .code{font-family:ui-monospace,Menlo,monospace;font-size:26px;font-weight:600;letter-spacing:.14em;
         background:#EEF4F5;border-radius:10px;padding:14px 0;margin:0 0 20px;user-select:all}
   .btn{display:inline-block;background:#0B5F6B;color:#fff;text-decoration:none;font-size:15px;
-       font-weight:600;padding:12px 28px;border-radius:10px}
+       font-weight:600;padding:12px 28px;border-radius:10px;margin-bottom:20px}
+  .btn2{display:inline-block;background:#EEF4F5;color:#0B5F6B;text-decoration:none;font-size:14px;
+        font-weight:600;padding:10px 24px;border-radius:10px}
 </style></head><body><div class="card"><div class="logo">모두와</div>${body}</div></body></html>`);
   });
 
