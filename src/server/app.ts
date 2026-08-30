@@ -1,6 +1,6 @@
 // moduwa 관광 데이터 REST API — Hono
 //  조회는 전부 읽기 전용. 예외적으로 리뷰(POST /v1/reviews)만 쓰기를 허용한다.
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
@@ -85,6 +85,10 @@ export function buildApp(): Hono<AppEnv> {
       '🔒 GET /v1/plans/:planId',
       '🔒 PUT /v1/plans/:planId  {authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
       '🔒 DELETE /v1/plans/:planId',
+      '🔒 POST /v1/plans/:planId/invites  (소유자 — 초대 코드 발급, 이전 코드 회수)',
+      '🔒 DELETE /v1/plans/:planId/invites  (소유자 — 초대 회수)',
+      '🔒 POST /v1/plan-invites/accept  {code}',
+      '🔒 DELETE /v1/plans/:planId/members/:uuid  (소유자 내보내기 / 본인 나가기)',
       '🔒 GET /v1/saved-places',
       '🔒 PUT /v1/saved-places/:contentId',
       '🔒 DELETE /v1/saved-places/:contentId',
@@ -130,6 +134,79 @@ export function buildApp(): Hono<AppEnv> {
       return c.json({ error: 'not_found' }, 404);
     }
   });
+  // ── 유니버설 링크 기반 (moduwa.app 루트가 이 서버를 가리킨다) ──────────────
+  //  ⚠️ 전부 **인증 없이** 연다. iOS 는 앱 설치 시점에 익명으로 AASA 를 받아가고,
+  //     초대 대체 페이지는 앱이 없는 사람이 보는 화면이다.
+  app.get('/.well-known/apple-app-site-association', (c) => {
+    // 비어 있으면 404 — 애플 CDN 이 "연결 없음" 상태의 빈 파일을 캐시하는 것보다 낫다.
+    if (config.web.appleAppIds.length === 0) return c.notFound();
+    // ⚠️ content-type 은 application/json 이어야 하고 리다이렉트가 없어야 한다(애플 요구사항).
+    return c.json({
+      applinks: { details: [{ appIDs: config.web.appleAppIds, components: [{ '/': '/i/*' }] }] },
+      webcredentials: { apps: config.web.appleAppIds },
+    });
+  });
+
+  app.get('/.well-known/assetlinks.json', (c) => {
+    if (!config.web.androidPackage || config.web.androidCertSha256.length === 0) return c.notFound();
+    return c.json([{
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: {
+        namespace: 'android_app',
+        package_name: config.web.androidPackage,
+        sha256_cert_fingerprints: config.web.androidCertSha256,
+      },
+    }]);
+  });
+
+  // 초대 링크의 대체 페이지 — **앱이 설치돼 있으면 이 페이지는 뜨지 않는다**(iOS 가 링크를
+  //  가로채 앱을 연다). 여기 도달했다는 것은 앱이 없거나, 카톡 인앱 웹뷰처럼 유니버설 링크가
+  //  발동하지 않는 경로로 열었다는 뜻이다. 코드를 크게 보여줘 앱에서 수동 입력할 수 있게 한다.
+  app.get('/i/:code', async (c) => {
+    // ⚠️ URL 파라미터를 화면에 그대로 되돌리지 않는다(XSS). 엄격히 검증해 통과한 값만 쓴다.
+    const raw = (c.req.param('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const valid = /^[A-Z0-9]{8}$/.test(raw);
+
+    let state: 'ok' | 'expired' | 'invalid' = 'invalid';
+    if (valid) {
+      const row = (await query<{ expired: boolean }>(
+        `select (expires_at <= now()) as expired from plan_invites
+          where code_hash = $1 and revoked_at is null`,
+        [createHash('sha256').update(raw).digest('hex')],
+      )).rows[0];
+      state = row ? (row.expired ? 'expired' : 'ok') : 'invalid';
+    }
+
+    const store = config.web.appStoreUrl;
+    const body = state === 'ok'
+      ? `<p class="m">여행 플랜에 초대받으셨어요.</p>
+         <p class="s">모두와 앱의 <b>플랜 → 초대 코드 입력</b>에서 아래 코드를 입력해주세요.</p>
+         <div class="code">${raw.slice(0, 4)}-${raw.slice(4)}</div>
+         ${store ? `<a class="btn" href="${store}">앱 받기</a>` : ''}`
+      : state === 'expired'
+        ? `<p class="m">초대가 만료되었어요.</p>
+           <p class="s">초대 코드는 30분 동안만 유효해요.<br>초대한 분에게 새 코드를 요청해주세요.</p>`
+        : `<p class="m">유효하지 않은 초대예요.</p>
+           <p class="s">링크가 잘못 전달됐을 수 있어요. 초대한 분에게 다시 요청해주세요.</p>`;
+
+    return c.html(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>모두와 — 플랜 초대</title>
+<style>
+  body{margin:0;font-family:-apple-system,'Apple SD Gothic Neo',sans-serif;background:#F7F8F8;color:#1C2B33;
+       display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .card{background:#fff;border-radius:16px;padding:40px 32px;max-width:340px;width:calc(100% - 48px);
+        text-align:center;box-shadow:0 2px 16px rgba(28,43,51,.08)}
+  .logo{font-weight:700;font-size:15px;color:#0B5F6B;letter-spacing:.02em;margin-bottom:20px}
+  .m{font-size:19px;font-weight:700;margin:0 0 10px}
+  .s{font-size:14px;line-height:1.7;color:#5B6B73;margin:0 0 20px}
+  .code{font-family:ui-monospace,Menlo,monospace;font-size:26px;font-weight:600;letter-spacing:.14em;
+        background:#EEF4F5;border-radius:10px;padding:14px 0;margin:0 0 20px;user-select:all}
+  .btn{display:inline-block;background:#0B5F6B;color:#fff;text-decoration:none;font-size:15px;
+       font-weight:600;padding:12px 28px;border-radius:10px}
+</style></head><body><div class="card"><div class="logo">모두와</div>${body}</div></body></html>`);
+  });
+
   app.get('/health', async (c) => {
     try {
       await query('select 1');
@@ -1071,11 +1148,26 @@ export function buildApp(): Hono<AppEnv> {
     return { authorId }
   }
 
+  /**
+   * 이 사람이 이 플랜에서 무엇인가. 소유자는 plans.author_id, 편집자는 plan_members 에 있다.
+   * 소유자를 멤버 테이블에 넣지 않는 이유: 두 곳에 있으면 권한 계산이 두 갈래가 된다(040).
+   */
+  const planRole = async (planId: string, authorId: number): Promise<'owner' | 'editor' | null> => {
+    const row = (await query<{ role: string }>(
+      `select case when p.author_id = $2 then 'owner'
+                   when m.author_id is not null then 'editor' end as role
+         from plans p left join plan_members m on m.plan_id = p.id and m.author_id = $2
+        where p.id = $1`,
+      [planId, authorId],
+    )).rows[0];
+    return (row?.role as 'owner' | 'editor') ?? null;
+  };
+
   const PLAN_SELECT = `
     select p.id, p.title,
            to_char(p.start_date, 'YYYY-MM-DD') as "startDate",
            to_char(p.end_date, 'YYYY-MM-DD')   as "endDate",
-           p.region, p.party, p.cover_image_url as "coverImageURL",
+           p.region, p.party, p.cover_image_url as "coverImageURL", p.version,
            p.themes, p.budget, p.day_trip_only as "dayTripOnly",
            to_char(p.confirmed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "confirmedAt",
            to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
@@ -1182,14 +1274,22 @@ export function buildApp(): Hono<AppEnv> {
     const authorId: number | null = gate.authorId;
     if (authorId == null) return c.json({ count: 0, items: [] });
 
+    // 내 소유 + 초대받은 플랜. myRole 로 앱이 "함께하는 플랜" 을 구분해 그린다.
     const rows = (await query<Record<string, unknown>>(
-      `${PLAN_SELECT} where p.author_id = $1 order by p.start_date desc, p.created_at desc`,
+      `${PLAN_SELECT}
+        where p.author_id = $1
+           or exists (select 1 from plan_members m where m.plan_id = p.id and m.author_id = $1)
+        order by p.start_date desc, p.created_at desc`,
       [authorId],
     )).rows;
+    const mine = new Set((await query<{ id: string }>(
+      'select id from plans where author_id = $1', [authorId],
+    )).rows.map((r) => r.id));
 
     const summaries = await loadSummaries(rows.map((r) => r.id as string));
     const items = rows.map((r) => ({
       ...r,
+      myRole: mine.has(r.id as string) ? 'owner' : 'editor',
       daySummaries: summaries.get(r.id as string)?.daySummaries ?? [],
       fallbackImageUrl: summaries.get(r.id as string)?.fallbackImageUrl ?? null,
     }));
@@ -1202,14 +1302,27 @@ export function buildApp(): Hono<AppEnv> {
     if (gate instanceof Response) return gate;
     const authorId: number | null = gate.authorId;
 
-    const plan = (await query<Record<string, unknown>>(
-      `${PLAN_SELECT} where p.id = $1 and p.author_id = $2`,
-      [c.req.param('planId'), authorId],
-    )).rows[0];
+    const planId = c.req.param('planId');
+    const role = await planRole(planId, authorId);
     // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 존재 여부가 새어 나갈 이유가 없다.
-    if (!plan) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404);
+    if (!role) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404);
 
-    return c.json({ ...plan, days: await loadDays(plan.id as string) });
+    const plan = (await query<Record<string, unknown>>(
+      `${PLAN_SELECT} where p.id = $1`, [planId],
+    )).rows[0]!;
+    // 멤버 목록 — 소유자가 먼저. uuid 만 노출한다(authors.id 는 응답에 넣지 않는 기존 규칙).
+    const members = (await query<{ uuid: string; nickname: string; role: string }>(
+      `select a.uuid, a.nickname, 'owner' as role
+         from plans p join authors a on a.id = p.author_id where p.id = $1
+       union all
+       select a.uuid, a.nickname, m.role
+         from plan_members m join authors a on a.id = m.author_id
+        where m.plan_id = $1
+        order by role desc`,
+      [planId],
+    )).rows;
+
+    return c.json({ ...plan, myRole: role, members, days: await loadDays(planId) });
   });
 
   // 새 플랜 플로우 4/6·5/6 의 선택지. 표시 문구를 앱에 하드코딩하지 않고 여기서 내려보낸다 —
@@ -1354,6 +1467,14 @@ export function buildApp(): Hono<AppEnv> {
     const gate = requireAuth(c)
     if (gate instanceof Response) return gate
     if (!title) return c.json({ error: 'missing_title', message: '플랜 제목은 비어 있을 수 없습니다.' }, 400)
+    // 낙관적 잠금 토큰. 조회 응답의 version 을 그대로 되돌려 보낸다.
+    let bodyVersion: number | null = null
+    if (p.version !== undefined) {
+      if (typeof p.version !== 'number' || !Number.isInteger(p.version) || p.version < 1) {
+        return c.json({ error: 'invalid_version', message: 'version 은 1 이상의 정수여야 합니다.' }, 400)
+      }
+      bodyVersion = p.version
+    }
     if (title.length > MAX_PLAN_TITLE) {
       return c.json({ error: 'invalid_title', message: `제목은 ${MAX_PLAN_TITLE}자 이하여야 합니다.` }, 400)
     }
@@ -1413,25 +1534,58 @@ export function buildApp(): Hono<AppEnv> {
         )).rows[0]
         if (!author) throw new Error('author_missing')
 
-        // 남의 플랜을 덮어쓰지 못하게 소유자까지 조건에 넣는다. 이미 있는데 주인이 다르면
-        // 아래 upsert 가 0행을 갱신하고, 그 사실을 rowCount 로 잡아 403 을 낸다.
-        const upserted = await client.query(
-          `insert into plans (id, author_id, title, start_date, end_date, region, party,
-                              cover_image_url, themes, budget, day_trip_only)
-           values ($1, $2, $3, $4, $5, $6, coalesce($7::jsonb, '{}'::jsonb), $8, $9, $10, $11)
-           on conflict (id) do update
-             set title = excluded.title, start_date = excluded.start_date,
-                 end_date = excluded.end_date, region = excluded.region,
-                 party = excluded.party, cover_image_url = excluded.cover_image_url,
-                 themes = excluded.themes, budget = excluded.budget,
-                 day_trip_only = excluded.day_trip_only,
-                 updated_at = now()
-           where plans.author_id = $2`,
-          [planId, author.id, title, startDate, endDate,
-           str(p.region) || null, JSON.stringify(p.party ?? {}), str(p.coverImageURL) || null,
-           themes, budget, dayTripOnly],
-        )
-        if (upserted.rowCount === 0) throw new Error('forbidden')
+        // 이미 있는 플랜인지, 있다면 내가 손댈 수 있는지 먼저 확정한다.
+        //  for update 로 잠근다 — 두 멤버가 동시에 저장하면 한쪽이 여기서 기다렸다가
+        //  올라간 version 을 보고 아래에서 409 로 떨어진다. 잠그지 않으면 둘 다 통과한다.
+        const existing = (await client.query<{ author_id: number; version: number }>(
+          'select author_id, version from plans where id = $1 for update', [planId],
+        )).rows[0]
+
+        if (existing) {
+          const isOwner = Number(existing.author_id) === author.id
+          if (!isOwner) {
+            const member = await client.query(
+              'select 1 from plan_members where plan_id = $1 and author_id = $2',
+              [planId, author.id],
+            )
+            if (member.rowCount === 0) throw new Error('forbidden')
+          }
+
+          // ── 낙관적 잠금. 본문을 통째로 교체하는 저장이라, 버전 검사가 없으면
+          //    늦게 저장한 멤버가 먼저 저장한 멤버의 작업을 소리 없이 되돌린다(040).
+          if (bodyVersion != null) {
+            if (bodyVersion !== existing.version) throw new Error('version_conflict')
+          } else {
+            // 버전 없는 저장은 구버전 앱이다. 혼자 쓰는 플랜은 지금처럼 통과시키고(호환),
+            // **공유 플랜만** 막는다 — 공유에 참여하려면 어차피 새 앱이 필요하므로,
+            // 구버전 앱이 공유 플랜을 덮어쓸 수 있는 조합 자체가 생기지 않게 한다.
+            const shared = await client.query(
+              'select 1 from plan_members where plan_id = $1 limit 1', [planId],
+            )
+            if (shared.rowCount) throw new Error('version_required')
+          }
+
+          await client.query(
+            `update plans
+                set title = $2, start_date = $3, end_date = $4, region = $5,
+                    party = coalesce($6::jsonb, '{}'::jsonb), cover_image_url = $7,
+                    themes = $8, budget = $9, day_trip_only = $10,
+                    version = version + 1, updated_at = now()
+              where id = $1`,
+            [planId, title, startDate, endDate, str(p.region) || null,
+             JSON.stringify(p.party ?? {}), str(p.coverImageURL) || null,
+             themes, budget, dayTripOnly],
+          )
+        } else {
+          await client.query(
+            `insert into plans (id, author_id, title, start_date, end_date, region, party,
+                                cover_image_url, themes, budget, day_trip_only)
+             values ($1, $2, $3, $4, $5, $6, coalesce($7::jsonb, '{}'::jsonb), $8, $9, $10, $11)`,
+            [planId, author.id, title, startDate, endDate,
+             str(p.region) || null, JSON.stringify(p.party ?? {}), str(p.coverImageURL) || null,
+             themes, budget, dayTripOnly],
+          )
+        }
 
         // days/items 통째 교체. cascade 로 items 까지 함께 지워진다.
         await client.query('delete from plan_days where plan_id = $1', [planId])
@@ -1485,7 +1639,23 @@ export function buildApp(): Hono<AppEnv> {
     } catch (error) {
       const reason = error instanceof Error ? error.message : ''
       if (reason === 'forbidden') {
-        return c.json({ error: 'forbidden', message: '다른 기기의 플랜은 저장할 수 없습니다.' }, 403)
+        return c.json({ error: 'forbidden', message: '이 플랜을 편집할 권한이 없습니다.' }, 403)
+      }
+      if (reason === 'version_required') {
+        return c.json({
+          error: 'version_required',
+          message: '함께 쓰는 플랜은 최신 앱에서만 저장할 수 있습니다.',
+        }, 400)
+      }
+      if (reason === 'version_conflict') {
+        // 최신본을 함께 준다 — 앱이 "다른 멤버가 방금 수정했어요" 안내 후 이걸로 갈아끼운다.
+        //  다시 GET 을 부르게 하면 그 사이 또 바뀔 수 있고, 왕복도 한 번 늘어난다.
+        const latest = (await query<Record<string, unknown>>(`${PLAN_SELECT} where p.id = $1`, [planId])).rows[0]
+        return c.json({
+          error: 'version_conflict',
+          message: '다른 멤버가 방금 이 플랜을 수정했어요. 최신 내용을 확인한 뒤 다시 저장해주세요.',
+          latest: latest ? { ...latest, days: await loadDays(planId) } : null,
+        }, 409)
       }
       if (reason === 'invalid_day_date') {
         return c.json({ error: 'invalid_date', message: 'days[].date 는 YYYY-MM-DD 여야 합니다.' }, 400)
@@ -1519,11 +1689,174 @@ export function buildApp(): Hono<AppEnv> {
     // 남의 플랜과 없는 플랜을 구분해 주지 않는다 — 조회와 같은 규칙이다.
     if (authorId == null) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
 
+    const planId = c.req.param('planId')
     const result = await query(
       'delete from plans where id = $1 and author_id = $2',
-      [c.req.param('planId'), authorId],
+      [planId, authorId],
     )
-    if (result.rowCount === 0) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+    if (result.rowCount === 0) {
+      // 편집자에게는 404 대신 403 — 멤버는 플랜의 존재를 이미 알고 있으므로 숨길 것이 없고,
+      //  "없다" 고 하면 앱이 목록에서 지워 버리는 잘못된 처리를 유도한다.
+      const role = await planRole(planId, authorId)
+      if (role === 'editor') {
+        return c.json({ error: 'owner_only', message: '플랜 삭제는 소유자만 할 수 있습니다.' }, 403)
+      }
+      return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+    }
+    return c.body(null, 204)
+  })
+
+  // ── 플랜 공동 편집: 초대 · 멤버 ─────────────────────────────────────────────
+
+  // 초대 코드 발급 — 소유자만. 새로 만들면 **이전 활성 코드는 회수된다**(플랜당 활성 코드
+  //  하나). "링크 회수" 를 별도 화면 없이 재발급 한 번으로 해결하려는 것이다.
+  v1.post('/plans/:planId/invites', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const planId = c.req.param('planId')
+
+    const role = await planRole(planId, gate.authorId)
+    if (!role) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+    if (role !== 'owner') {
+      return c.json({ error: 'owner_only', message: '초대는 소유자만 할 수 있습니다.' }, 403)
+    }
+
+    // 8자, 헷갈리는 글자(0/O·1/I/L) 제외 — 대체 페이지에서 수동 입력할 수 있어야 한다.
+    //  공간 31^8 ≈ 8.5e11 에 30분 만료·해시 저장이라 무차별 대입은 성립하지 않는다.
+    const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+    const code = Array.from({ length: 8 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('')
+
+    const expires = (await withTransaction(async (client) => {
+      await client.query(
+        'update plan_invites set revoked_at = now() where plan_id = $1 and revoked_at is null',
+        [planId],
+      )
+      return (await client.query<{ expires_at: Date }>(
+        `insert into plan_invites (plan_id, code_hash, created_by, expires_at)
+         values ($1, $2, $3, now() + make_interval(mins => $4))
+         returning expires_at`,
+        [planId, createHash('sha256').update(code).digest('hex'), gate.authorId, config.plans.inviteMinutes],
+      )).rows[0]!.expires_at
+    }))
+
+    return c.json({
+      code,
+      // 유니버설 링크. 앱이 있으면 바로 앱이 열리고, 없으면 /i/:code 대체 페이지가 받는다.
+      inviteUrl: `${config.web.origin}/i/${code}`,
+      expiresAt: expires.toISOString(),
+      expiresInMinutes: config.plans.inviteMinutes,
+    }, 201)
+  })
+
+  // 초대 회수 — 재발급 없이 링크만 죽이고 싶을 때.
+  v1.delete('/plans/:planId/invites', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const planId = c.req.param('planId')
+
+    const role = await planRole(planId, gate.authorId)
+    if (!role) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+    if (role !== 'owner') {
+      return c.json({ error: 'owner_only', message: '초대 관리는 소유자만 할 수 있습니다.' }, 403)
+    }
+    await query('update plan_invites set revoked_at = now() where plan_id = $1 and revoked_at is null', [planId])
+    return c.body(null, 204)
+  })
+
+  // 초대 수락 — 코드를 소비하지 않는다(단톡방 하나로 여럿이 들어오는 것이 정상 시나리오).
+  //  만료·회수·정원이 통제 장치다.
+  v1.post('/plan-invites/accept', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    let payload: unknown
+    try { payload = await c.req.json() } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    const raw = typeof (payload as Record<string, unknown>)?.code === 'string'
+      ? ((payload as Record<string, unknown>).code as string) : ''
+    // 대체 페이지가 WKQ3-M8DZ 처럼 하이픈을 넣어 보여주므로 구분자·소문자를 관대하게 받는다.
+    const code = raw.toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (!/^[A-Z0-9]{8}$/.test(code)) {
+      return c.json({ error: 'invalid_code', message: '초대 코드가 올바르지 않습니다.' }, 400)
+    }
+
+    const invite = (await query<{ plan_id: string; owner_id: number; expired: boolean; title: string }>(
+      `select i.plan_id, p.author_id as owner_id, (i.expires_at <= now()) as expired, p.title
+         from plan_invites i join plans p on p.id = i.plan_id
+        where i.code_hash = $1 and i.revoked_at is null`,
+      [createHash('sha256').update(code).digest('hex')],
+    )).rows[0]
+    if (!invite) return c.json({ error: 'invalid_code', message: '초대 코드가 올바르지 않습니다.' }, 400)
+    if (invite.expired) {
+      return c.json({
+        error: 'invite_expired',
+        message: '초대가 만료되었어요. 초대한 분에게 새 코드를 요청해주세요.',
+      }, 400)
+    }
+
+    const planId = invite.plan_id
+    if (Number(invite.owner_id) === gate.authorId) {
+      // 소유자가 자기 링크를 누른 경우 — 에러가 아니라 "이미 내 플랜" 이다.
+      return c.json({ planId, title: invite.title, myRole: 'owner', alreadyMember: true })
+    }
+
+    try {
+      await withTransaction(async (client) => {
+        // 정원 검사와 삽입을 한 트랜잭션에 — 나눠 두면 동시 수락이 정원을 넘는다.
+        const n = (await client.query<{ n: number }>(
+          'select count(*)::int as n from plan_members where plan_id = $1', [planId],
+        )).rows[0]!.n
+        // 소유자 1 + 멤버 n. 이미 멤버인 사람의 재수락은 정원과 무관하게 통과시켜야 하므로
+        // insert 결과로 판단한다.
+        const ins = await client.query(
+          `insert into plan_members (plan_id, author_id) values ($1, $2)
+             on conflict (plan_id, author_id) do nothing`,
+          [planId, gate.authorId],
+        )
+        if (ins.rowCount === 1 && n + 1 >= config.plans.memberCap) throw new Error('member_limit')
+      })
+    } catch (error) {
+      if (error instanceof Error && error.message === 'member_limit') {
+        return c.json({
+          error: 'member_limit',
+          message: `플랜 인원이 가득 찼어요 (최대 ${config.plans.memberCap}명).`,
+        }, 409)
+      }
+      throw error
+    }
+
+    return c.json({ planId, title: invite.title, myRole: 'editor', alreadyMember: false })
+  })
+
+  // 멤버 내보내기 / 나가기. 소유자는 아무나, 편집자는 자기 자신만 지울 수 있다.
+  v1.delete('/plans/:planId/members/:uuid', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const planId = c.req.param('planId')
+    const targetUuid = c.req.param('uuid')
+
+    const role = await planRole(planId, gate.authorId)
+    if (!role) return c.json({ error: 'not_found', message: '플랜을 찾을 수 없습니다.' }, 404)
+
+    const target = (await query<{ id: number }>(
+      'select id from authors where uuid = $1', [targetUuid],
+    )).rows[0]
+    if (!target) return c.json({ error: 'not_found', message: '멤버를 찾을 수 없습니다.' }, 404)
+
+    if (role === 'editor' && Number(target.id) !== gate.authorId) {
+      return c.json({ error: 'owner_only', message: '다른 멤버는 소유자만 내보낼 수 있습니다.' }, 403)
+    }
+    // 소유자 자신은 이 경로로 못 나간다 — 소유자가 빠지면 플랜이 주인 없는 상태가 된다.
+    //  소유자가 정리하고 싶으면 플랜 삭제다(소유권 이전은 v2).
+    if (role === 'owner' && Number(target.id) === gate.authorId) {
+      return c.json({ error: 'owner_cannot_leave', message: '소유자는 나갈 수 없습니다. 플랜을 삭제해주세요.' }, 400)
+    }
+
+    const del = await query(
+      'delete from plan_members where plan_id = $1 and author_id = $2', [planId, target.id],
+    )
+    if (del.rowCount === 0) return c.json({ error: 'not_found', message: '멤버를 찾을 수 없습니다.' }, 404)
     return c.body(null, 204)
   })
 
