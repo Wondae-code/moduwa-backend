@@ -83,7 +83,8 @@ const BUDGET_FALLBACK: Record<string, string[]> = {
 let weightCache: { at: number; map: Map<string, number> } | null = null;
 const WEIGHT_TTL_MS = 60_000;
 
-async function weights(): Promise<Map<string, number>> {
+/** 검색(app.ts /v1/search)도 이 캐시를 함께 쓴다 — search.* 키. */
+export async function weights(): Promise<Map<string, number>> {
   if (weightCache && Date.now() - weightCache.at < WEIGHT_TTL_MS) return weightCache.map;
   const rows = (await query<{ key: string; value: string }>(
     'select key, value from recommend_weights',

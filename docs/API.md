@@ -419,34 +419,22 @@ GET /v1/pet-friendly/1019041
 - `basicInfo`는 TourAPI `detailIntro2`의 **타입별로 다른 필드**를 공통 스키마로 정규화한 것이다 — 숙박(32)은 입실/퇴실을 `usetime`으로, 음식점(39)은 `opentimefood`/`restdatefood`, 축제(15)는 공연시간이 없으면 행사기간으로 대체하고 `fee`에 요금을 담는다
 - ⚠️ **커버리지 주의**: `kor_detail`은 관광지(12) 위주로 수집돼 있다. 숙박·음식점·축제는 `overview`/`basicInfo`가 `null`인 경우가 많으므로 클라이언트는 값이 없는 섹션을 숨겨야 한다
 
-### GET /v1/search — 통합 검색 (검색 페이지용)
-무장애 장소(barrier_free) 대상. 이름 부분 일치 + 지역명(주소) 매칭, 관련성 정렬(정확 > 접두 > 부분 > 지역, 동순위는 사진·접근성 정보 보유 우선).
+### GET /v1/search — 통합 검색 (관련성 정렬)
 
-| 파라미터 | 예시 | 설명 |
-|---|---|---|
-| `q` | `경복궁` | **필수.** 검색어(최대 100자). 없으면 `400 {"error":"missing_q"}` |
-| `limit`/`offset` | | 페이지네이션 |
+`q=` 필수(≤100자). 이름과 주소를 함께 찾습니다.
 
-응답:
-```json
-{
-  "total": 2, "limit": 20, "offset": 0, "count": 2,
-  "items": [{
-    "contentid": "126508", "title": "경복궁",
-    "contenttypeid": "12", "category": "관광지",
-    "region": "서울 종로구",
-    "firstimage": "https://tong.visitkorea.or.kr/...jpg",
-    "mapx": 126.9769, "mapy": 37.5796,
-    "access": { "wheelchair": true, "visual": true, "hearing": false, "infant": true, "elderly": true }
-  }]
-}
-```
-- `category`: 콘텐츠유형 라벨(12관광지·14문화시설·15축제공연행사·25여행코스·28레포츠·32숙박·38쇼핑·39음식점)
-- `region`: 주소 축약("서울특별시 종로구 …" → "서울 종로구")
-- `mapx`/`mapy`: 경도/위도. 목록·상세와 같은 표기이며 원본에 좌표가 없으면 `null`.
-  검색 결과를 플랜 일정에 담거나 지도에 찍을 때 쓴다 — 없으면 클라이언트가 상세를 한 번 더 불러야 한다
-- `access`: 접근성 배지 — 이동(wheelchair)·시각(visual)·청각(hearing)·영유아(infant) 정보 보유 여부
+**띄어쓰기와 기호를 무시합니다.** "경 복궁"·"황리단 길"도 잡힙니다 — 검색어와 색인 양쪽을
+같은 규칙(소문자·한글/영숫자만)으로 정규화해 비교합니다.
 
+**오타를 허용합니다.** "경북궁"→경복궁, "아꾸아리움"→아쿠아리움. 한글을 **자모로 분해**해
+(경복궁=ㄱㅕㅇㅂㅗㄱㄱㅜㅇ) 트라이그램 유사도를 재는 방식이라, 받침 하나 차이가 아홉 자 중
+한 자 차이로 계산됩니다. 음절 그대로 재면 이 오타는 잡히지 않습니다(한 글자가 통째로 바뀌므로).
+
+**정렬은 계층이 먼저입니다**: 이름 정확 일치 → 접두 → 부분 → 주소 부분 → 오타 추정.
+오타 추정 결과는 정확 일치 위로 올라오지 못하고, 유사도 점수는 같은 계층 안의 순서만
+정합니다. 임계값·가중치는 `recommend_weights`의 `search.*` 키로 배포 없이 조정합니다.
+
+응답 항목: `contentid`·`title`·`category`·`region`·`firstimage`·`mapx/mapy`·`access`(5유형).
 ### GET /v1/barrier-free/:contentId/related
 
 > **`rank` 를 그대로 따라 정렬하세요.** `source`(`rlte`/`nearby`)는 유래를 알려주는 참고값이지

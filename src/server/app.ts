@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
-import { type PartyKind, type RecommendInput, recommend } from './recommend';
+import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
 import { query, withTransaction } from '../db';
 import { buildDashboard } from './dashboard';
 import { buildAuthRoutes } from './auth-routes';
@@ -619,15 +619,36 @@ export function buildApp(): Hono<AppEnv> {
     if (!q) return c.json({ error: 'missing_q' }, 400);
     if (q.length > 100) return c.json({ error: 'q_too_long' }, 400);
     const { limit, offset } = paging(c);
-    const pattern = escapeLike(q); // $1 — ILIKE용, $2 는 정확 일치용 원문
 
-    const wsql = `where title ilike '%' || $1 || '%' or addr1 ilike '%' || $1 || '%'`;
+    // 검색어를 색인과 **같은 규칙**으로 정규화한다(041 의 생성 컬럼 식과 자소 단위까지 동일).
+    //  "경 복궁"·"황리단 길" 이 0건이던 원인이 이 정규화의 부재였다 — ILIKE 는 부분 문자열이
+    //  정확히 이어져야 잡는데, 원문끼리 비교하면 띄어쓰기 하나로 어긋난다.
+    //  정규화가 %·_ 를 제거하므로 LIKE 이스케이프도 더는 필요 없다.
+    const norm = q.toLowerCase().replace(/[^0-9a-z가-힣]/g, '');
+    // 기호만 친 검색어는 정규화 후 빈 문자열 — '%%' 로 전체를 돌려주는 대신 솔직하게 0건.
+    if (!norm) return c.json({ total: 0, limit, offset, count: 0, sort: null, items: [] });
+
+    const w = await weights();
+    const tSim  = w.get('search.jamo_sim_threshold')  ?? 0.4;
+    const tWord = w.get('search.jamo_word_threshold') ?? 0.5;
+    const mix   = w.get('search.jamo_word_mix')       ?? 0.5;
+    const addrW = w.get('search.addr_weight')         ?? 0.6;
+
+    // ── 오타 폴백은 자모 단위다(041 주석의 실측 근거).
+    //  음절 트라이그램은 받침 하나 차이("경북궁"→"경복궁")를 못 잡는다 — 한글 음절은 한 글자가
+    //  통째로 달라져 3글자 창이 전부 어긋난다. 자모로 풀면 9자 중 1자 차이가 된다.
+    //  포함 조건은 두 지표의 OR(느슨하게), 순위는 sim + mix×wsim(오답 분리)이다.
+    const wsql = `
+      where b.title_norm like '%' || qq.n || '%'
+         or b.addr1_norm like '%' || qq.n || '%'
+         or similarity(b.title_jamo, qq.j) > ${Number(tSim)}
+         or word_similarity(qq.j, b.title_jamo) > ${Number(tWord)}`;
+
     const total = (await query<{ n: number }>(
-      `select count(*)::int n from barrier_free ${wsql}`, [pattern],
+      `with qq as (select $1::text as n, hangul_jamo($1) as j)
+       select count(*)::int n from barrier_free b, qq ${wsql}`, [norm],
     )).rows[0]!.n;
-    // mapx/mapy 를 함께 내보낸다 — 목록(`BF_COLS`)·상세는 이미 주는데 검색만 자기 select 를
-    //  따로 써서 빠져 있었다. 이게 없으면 검색으로 담은 장소는 좌표가 없어 플랜 지도에 핀이
-    //  안 찍히고 구간 거리도 못 낸다(클라이언트가 상세를 한 번 더 부르는 수밖에 없었다).
+
     const rows = (await query<{
       contentid: string; title: string | null; contenttypeid: string | null;
       addr1: string | null; firstimage: string | null;
@@ -635,16 +656,26 @@ export function buildApp(): Hono<AppEnv> {
       access_wheelchair: boolean; access_visual: boolean; access_hearing: boolean;
       access_infant: boolean; access_elderly: boolean;
     }>(
-      `select contentid, title, contenttypeid, addr1, firstimage, mapx, mapy,
-              access_wheelchair, access_visual, access_hearing, access_infant, access_elderly
-         from barrier_free ${wsql}
-        order by case
-            when lower(title) = lower($2)     then 0
-            when title ilike $1 || '%'        then 1
-            when title ilike '%' || $1 || '%' then 2
-            else 3
-          end, has_image desc, has_access desc, char_length(title), title, contentid
-        limit ${limit} offset ${offset}`, [pattern, q],
+      `with qq as (select $1::text as n, hangul_jamo($1) as j)
+       select b.contentid, b.title, b.contenttypeid, b.addr1, b.firstimage, b.mapx, b.mapy,
+              b.access_wheelchair, b.access_visual, b.access_hearing, b.access_infant, b.access_elderly
+         from barrier_free b, qq ${wsql}
+        order by
+          -- 계층이 먼저다: 정확 > 접두 > 부분 > 주소 > 오타 추정. 오타 폴백이 정확 일치 위로
+          --  올라오면 안 되고, 유사도 점수는 같은 계층 안의 순서만 정한다.
+          case
+            when b.title_norm = qq.n                    then 0
+            when b.title_norm like qq.n || '%'          then 1
+            when b.title_norm like '%' || qq.n || '%'   then 2
+            when b.addr1_norm like '%' || qq.n || '%'   then 3
+            else 4
+          end,
+          greatest(
+            similarity(b.title_jamo, qq.j) + ${Number(mix)} * word_similarity(qq.j, b.title_jamo),
+            ${Number(addrW)} * similarity(b.addr1_norm, qq.n)
+          ) desc,
+          b.has_image desc, b.has_access desc, char_length(b.title), b.title, b.contentid
+        limit ${limit} offset ${offset}`, [norm],
     )).rows;
 
     const items = rows.map((r) => ({
