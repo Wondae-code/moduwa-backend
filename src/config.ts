@@ -131,6 +131,20 @@ export const config = {
     appStoreUrl: process.env.APP_STORE_URL?.trim() ?? '',
   },
 
+  // ── 푸시 알림(APNs) ──
+  //  ⚠️ 키가 비면 **실제로 보내지 않고 콘솔에 찍는다**(mailer 와 같은 판단). 로컬에서 트리거·문구·
+  //     중복 억제를 메일함 없이 검증할 수 있고, 배포에 키가 없어도 요청이 실패하지 않는다.
+  apns: {
+    // .p8 파일 내용을 base64 로 넣는다 — 파일을 저장소에 두지 않기 위함이다.
+    keyP8Base64: process.env.APNS_KEY_P8_BASE64?.trim() ?? '',
+    keyId: process.env.APNS_KEY_ID?.trim() ?? '',
+    teamId: process.env.APNS_TEAM_ID?.trim() ?? '',
+    // 앱 번들 ID. APNs 의 apns-topic 헤더 값이다.
+    topic: process.env.APNS_TOPIC?.trim() ?? '',
+    // 같은 (게시글, 행위자) 좋아요 알림을 묶는 창(시간). 껐다 켜기를 반복해도 하루 1회다.
+    likeDedupeHours: num('APNS_LIKE_DEDUPE_HOURS', 24),
+  },
+
   // ── 플랜 공동 편집 ──
   plans: {
     // 초대 코드 유효시간(분). 기획 확정값 30 — 링크가 단톡방에 남는 것 대비 짧게 가져가고,

@@ -8,6 +8,7 @@ import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
+import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
 import { buildDashboard } from './dashboard';
 import { buildAuthRoutes } from './auth-routes';
@@ -1854,8 +1855,11 @@ export function buildApp(): Hono<AppEnv> {
       return c.json({ planId, title: invite.title, myRole: 'owner', alreadyMember: true })
     }
 
+    // 이번 요청으로 **새로 들어왔는지**. 이미 멤버였다면 알림을 보내지 않고(초대 링크를 두 번
+    //  열면 두 번 울린다) 응답의 alreadyMember 도 true 여야 한다.
+    let joinedNow = false
     try {
-      await withTransaction(async (client) => {
+      joinedNow = await withTransaction(async (client) => {
         // 정원 검사와 삽입을 한 트랜잭션에 — 나눠 두면 동시 수락이 정원을 넘는다.
         const n = (await client.query<{ n: number }>(
           'select count(*)::int as n from plan_members where plan_id = $1', [planId],
@@ -1868,6 +1872,7 @@ export function buildApp(): Hono<AppEnv> {
           [planId, gate.authorId],
         )
         if (ins.rowCount === 1 && n + 1 >= config.plans.memberCap) throw new Error('member_limit')
+        return ins.rowCount === 1
       })
     } catch (error) {
       if (error instanceof Error && error.message === 'member_limit') {
@@ -1877,6 +1882,30 @@ export function buildApp(): Hono<AppEnv> {
         }, 409)
       }
       throw error
+    }
+
+    // 이미 멤버였으면 알림 없이 끝낸다 — 초대 링크를 두 번 열어도 두 번 울리지 않는다.
+    if (!joinedNow) {
+      return c.json({ planId, title: invite.title, myRole: 'editor', alreadyMember: true })
+    }
+
+    // 소유자 + 기존 멤버에게 알린다(신규 합류만).
+    const joined = (await query<{ nickname: string }>(
+      'select nickname from authors where id = $1', [gate.authorId],
+    )).rows[0]?.nickname ?? '새 멤버'
+    const targets = (await query<{ id: number }>(
+      `select author_id as id from plan_members where plan_id = $1 and author_id <> $2
+       union
+       select author_id from plans where id = $1 and author_id <> $2`,
+      [planId, gate.authorId],
+    )).rows
+    for (const t of targets) {
+      await pushToAuthor(Number(t.id), {
+        title: '모두와',
+        body: `${joined}님이 '${quote(invite.title, 20)}'에 합류했어요`,
+        data: { type: 'plan_member_joined', planId },
+        threadId: `plan:${planId}`,
+      })
     }
 
     return c.json({ planId, title: invite.title, myRole: 'editor', alreadyMember: false })
@@ -2378,6 +2407,40 @@ export function buildApp(): Hono<AppEnv> {
    * 좋아요는 **이름이 필요 없는 행동**이라 닉네임을 묻지 않는다(저장과 같은 판단) —
    * 하트 하나 누르자고 이름을 요구하면 대부분은 그냥 떠난다.
    */
+  /**
+   * 게시글 작성자에게 좋아요·댓글을 알린다.
+   *
+   * ⚠️ **자기 행동에는 보내지 않는다** — 내 글에 내가 좋아요·댓글을 달았을 때.
+   * ⚠️ await 하지만 pushToAuthor 는 던지지 않는다(push.ts 주석) — 알림 실패가 원 요청을
+   *    깨뜨리면 사용자는 자기 행동이 실패한 것으로 본다.
+   */
+  const notifyPostActor = async (
+    postId: string, actorId: number, kind: 'like' | 'comment', commentBody?: string, commentId?: string,
+  ) => {
+    const row = (await query<{ author_id: number; actor: string }>(
+      `select p.author_id, (select nickname from authors where id = $2) as actor
+         from posts p where p.id = $1`, [postId, actorId],
+    )).rows[0]
+    if (!row || Number(row.author_id) === actorId) return   // 없는 글 · 자기 행동
+
+    if (kind === 'like') {
+      await pushToAuthor(Number(row.author_id), {
+        title: '모두와',
+        body: `${row.actor}님이 회원님의 글을 좋아합니다`,
+        data: { type: 'post_like', postId },
+        threadId: `post:${postId}`,
+      }, `post_like:${postId}:${actorId}`)
+    } else {
+      // 댓글은 대화라 매번 보낸다 — eventKey 에 댓글 id 를 넣어 억제되지 않게 한다.
+      await pushToAuthor(Number(row.author_id), {
+        title: '모두와',
+        body: `${row.actor}님이 댓글을 남겼어요: ${quote(commentBody ?? '')}`,
+        data: { type: 'post_comment', postId },
+        threadId: `post:${postId}`,
+      }, commentId ? `post_comment:${commentId}` : undefined)
+    }
+  }
+
   const setPostLike = async (c: Context, liked: boolean) => {
     const gate = requireAuth(c)
     if (gate instanceof Response) return gate
@@ -2391,6 +2454,9 @@ export function buildApp(): Hono<AppEnv> {
       await query(
         `insert into post_likes (post_id, author_id) values ($1, $2)
          on conflict (post_id, author_id) do nothing`, [postId, authorId])
+      // 알림은 **켜질 때만**. 끄는 것은 알릴 일이 아니다.
+      //  eventKey 에 (글, 누른 사람)을 넣어 껐다 켜기를 반복해도 창 안에서 한 번만 간다.
+      await notifyPostActor(postId, authorId, 'like')
     } else {
       const authorId: number | null = gate.authorId
       if (authorId != null) {
@@ -2617,6 +2683,7 @@ export function buildApp(): Hono<AppEnv> {
 
     const comment = (await query<Record<string, unknown>>(
       `${POST_COMMENT_SELECT} where c.id = $1`, [commentId])).rows[0]!
+    await notifyPostActor(postId, gate.authorId, 'comment', body, String(commentId))
     return c.json(shapePostComment(comment), 201)
   })
 
