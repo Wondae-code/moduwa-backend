@@ -40,6 +40,11 @@ X-Session-Token: <SESSION_TOKEN>
 | 저장 | `GET /v1/saved-places`, `PUT/DELETE /v1/saved-places/:contentId` |
 | 게시글 목록의 내 것 필터 | `GET /v1/posts?mine=true`, `?liked=true` |
 
+**보는 사람 기준 파생 값.** 게시글(목록·단건·생성·수정)과 게시글 댓글 응답에는 `likedByMe`와
+`isMine`이 함께 실립니다. 둘 다 **세션이 누구인지**로 계산하고, 비로그인은 둘 다 `false`입니다
+(`null`이 아닙니다). `isMine`은 수정·삭제 메뉴를 띄울지 판단하는 값입니다 — 닉네임 비교로
+대신하면 동명이인에서 틀립니다.
+
 > ⚠️ **`deviceId`는 더 이상 신원이 아닙니다.** 예전에는 이 값만으로 그 사람이 되어, 값을 아는
 > 사람이 남의 데이터를 보거나 대신 글을 쓸 수 있었습니다. 지금 쓰기 라우트는 `deviceId`를
 > 아예 읽지 않습니다. 가입·로그인 요청에서만 "어느 기기인가"를 기록하는 데 씁니다.

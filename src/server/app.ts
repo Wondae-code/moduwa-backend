@@ -2066,8 +2066,9 @@ export function buildApp(): Hono<AppEnv> {
   const MAX_POST_IMAGES = 5
 
   /** 목록·단건 공통 select. 붙인 장소는 별도 쿼리로 모아 붙인다(N+1 회피). */
-  /// $1 은 **보는 사람의 author_id**(없으면 null) — "내가 좋아요를 눌렀나"를 함께 준다.
-  ///  숫자만 주면 버튼이 눌린 상태를 그릴 수 없다.
+  /// $1 은 **보는 사람의 author_id**(없으면 null) — "내가 좋아요를 눌렀나"와 "내 글인가"를
+  ///  함께 준다. 숫자만 주면 버튼이 눌린 상태를, 작성자 닉네임만 주면 수정·삭제 메뉴를
+  ///  띄울지를 클라이언트가 판단할 수 없다(앱 팀 요청).
   const POST_SELECT = `
     select p.id, p.body, p.image_urls as "imageURLs",
            p.access_features as "accessFeatures",
@@ -2078,14 +2079,23 @@ export function buildApp(): Hono<AppEnv> {
              select 1 from post_likes pl
               where pl.post_id = p.id and pl.author_id = $VIEWER
            ) as "likedByMe",
+           -- ⚠️ coalesce 가 필요하다. 비로그인이면 $VIEWER 가 null 이고, SQL 에서
+           --  "author_id = null" 은 false 가 아니라 **NULL** 이다. 그대로 두면 isMine 이
+           --  false 가 아니라 null 로 나가서, 앱이 비로그인 상태를 판정할 수 없다.
+           coalesce(p.author_id = $VIEWER, false) as "isMine",
            to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
       from posts p
       join authors a on a.id = p.author_id`
 
-  /** 보는 사람 자리를 실제 파라미터 번호로 바꿔 준다. */
+  /**
+   * 보는 사람 자리를 실제 파라미터 번호로 바꿔 준다.
+   *
+   * ⚠️ **replaceAll 이어야 한다.** $VIEWER 는 한 번이 아니다(likedByMe · isMine). replace 로
+   *    두면 뒤쪽이 그대로 남아 Postgres 가 "$VIEWER" 를 문법 오류로 거절한다.
+   */
   const postSelect = (viewerParam: number) =>
-    POST_SELECT.replace('$VIEWER', `$${viewerParam}`)
+    POST_SELECT.replaceAll('$VIEWER', `$${viewerParam}`)
 
   /**
    * 게시글 한 건에 작성자 프로필을 덧붙인다(042).
@@ -2610,11 +2620,16 @@ export function buildApp(): Hono<AppEnv> {
 
   // ── 게시글 댓글 ─────────────────────────────────────────────────────────────
 
+  /// 게시글과 같은 규칙이다 — $VIEWER 는 보는 사람의 author_id(없으면 null).
   const POST_COMMENT_SELECT = `
     select c.id, a.nickname as author, a.avatar_url as author_avatar, c.body,
+           coalesce(c.author_id = $VIEWER, false) as "isMine",
            to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt"
       from post_comments c
       join authors a on a.id = c.author_id`
+
+  const postCommentSelect = (viewerParam: number) =>
+    POST_COMMENT_SELECT.replaceAll('$VIEWER', `$${viewerParam}`)
 
   /** 게시글 댓글에 작성자 프로필을 덧붙인다(042). 내부 컬럼명이 새어 나가지 않게 감싼다. */
   const shapePostComment = (row: Record<string, unknown>) => {
@@ -2632,9 +2647,11 @@ export function buildApp(): Hono<AppEnv> {
     const postId = c.req.param('postId') ?? ''
     const total = (await query<{ n: number }>(
       'select count(*)::int n from post_comments where post_id = $1', [postId])).rows[0]!.n
+    // 보는 사람 = 세션의 계정. 목록 자체는 공개라 비로그인이면 null 이고 isMine 은 false 다.
+    const viewerId = authorOf(c)
     const rows = (await query(
-      `${POST_COMMENT_SELECT} where c.post_id = $1
-        order by c.created_at limit ${limit} offset ${offset}`, [postId],
+      `${postCommentSelect(2)} where c.post_id = $1
+        order by c.created_at limit ${limit} offset ${offset}`, [postId, viewerId],
     )).rows
     return c.json({
       total, limit, offset, count: rows.length, items: rows.map(shapePostComment),
@@ -2682,7 +2699,7 @@ export function buildApp(): Hono<AppEnv> {
     })
 
     const comment = (await query<Record<string, unknown>>(
-      `${POST_COMMENT_SELECT} where c.id = $1`, [commentId])).rows[0]!
+      `${postCommentSelect(2)} where c.id = $1`, [commentId, gate.authorId])).rows[0]!
     await notifyPostActor(postId, gate.authorId, 'comment', body, String(commentId))
     return c.json(shapePostComment(comment), 201)
   })
