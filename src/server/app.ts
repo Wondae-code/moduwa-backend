@@ -81,6 +81,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/review-tags',
       '🔒 POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm?, tags?, wouldRevisit?, imageURLs?}',
       '🔒 POST /v1/reviews/:reviewId/comments  {body, authorNm?}',
+      '🔒 PATCH · DELETE /v1/reviews/:reviewId/comments/:commentId  (본인 것만)',
       '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?, avoidCrowds?}',
       '🔒 GET /v1/plans',
       '🔒 GET /v1/plans/:planId',
@@ -104,6 +105,7 @@ export function buildApp(): Hono<AppEnv> {
       '🔒 DELETE /v1/reviews/:reviewId/like',
       'GET /v1/posts/:postId/comments',
       '🔒 POST /v1/posts/:postId/comments  {body, authorNm?}',
+      '🔒 PATCH · DELETE /v1/posts/:postId/comments/:commentId  (본인 것만)',
       '🔒 POST /v1/reviews/:reviewId/report  {reason, detail?}',
       '🔒 POST /v1/devices  {token, platform?, environment, bundleId?}',
       '🔒 DELETE /v1/devices/:token',
@@ -1063,13 +1065,20 @@ export function buildApp(): Hono<AppEnv> {
   //  작성자 식별은 리뷰와 같다(기기 UUID + 닉네임 → authors 대리키). device_id 는 내보내지 않는다.
   const MAX_COMMENT_LEN = 1000;
 
+  /// $VIEWER 는 보는 사람의 author_id(없으면 null) — 게시글 댓글과 같은 규칙이다.
+  ///  ⚠️ coalesce 가 필요하다. 비로그인이면 "author_id = null" 이 false 가 아니라 NULL 이다.
   const COMMENT_SELECT = `
     select c.id, c.body,
+           coalesce(c.author_id = $VIEWER, false) as "isMine",
            to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            a.nickname as author, a.avatar_url as author_avatar,
            (select count(*)::int from reviews r2 where r2.author_id = c.author_id) as author_review_count
       from review_comments c
       join authors a on a.id = c.author_id`;
+
+  /** 보는 사람 자리를 실제 파라미터 번호로 바꿔 준다(replaceAll — 늘어나도 안전하다). */
+  const commentSelect = (viewerParam: number) =>
+    COMMENT_SELECT.replaceAll('$VIEWER', `$${viewerParam}`);
 
   type CommentRow = Record<string, unknown> & {
     author: string; author_review_count: number | null; author_avatar: string | null;
@@ -1093,6 +1102,15 @@ export function buildApp(): Hono<AppEnv> {
     return Number.isInteger(n) && n > 0 ? n : null;
   };
 
+  /**
+   * 경로의 댓글 id 를 정수로. 형식이 틀리면 null (404). 후기 댓글·게시글 댓글이 함께 쓴다.
+   *
+   * ⚠️ 문자열로 돌려준다 — bigserial 은 자바스크립트 정수 범위를 넘을 수 있고, Number 로
+   *    바꾸면 큰 id 가 조용히 어긋난다. 형식만 확인하고 값은 그대로 파라미터로 넘긴다.
+   */
+  const parseCommentId = (raw: string | undefined): string | null =>
+    raw && /^[0-9]{1,18}$/.test(raw) ? raw : null;
+
   // 댓글 목록 — 대화 순서(오래된 순). 리뷰가 없으면 404.
   v1.get('/reviews/:reviewId/comments', async (c) => {
     const reviewId = parseReviewId(c.req.param('reviewId'));
@@ -1105,9 +1123,11 @@ export function buildApp(): Hono<AppEnv> {
     const total = (await query<{ n: number }>(
       'select count(*)::int n from review_comments where review_id = $1', [reviewId],
     )).rows[0]!.n;
+    // 보는 사람 = 세션의 계정. 목록은 공개라 비로그인이면 null 이고 isMine 은 false 다.
+    const viewerId = authorOf(c);
     const rows = (await query<CommentRow>(
-      `${COMMENT_SELECT} where c.review_id = $1 order by c.created_at, c.id limit ${limit} offset ${offset}`,
-      [reviewId],
+      `${commentSelect(2)} where c.review_id = $1 order by c.created_at, c.id limit ${limit} offset ${offset}`,
+      [reviewId, viewerId],
     )).rows;
     return c.json({ reviewId, total, limit, offset, count: rows.length, items: rows.map(shapeComment) });
   });
@@ -1165,8 +1185,82 @@ export function buildApp(): Hono<AppEnv> {
       return inserted.id;
     });
 
-    const row = (await query<CommentRow>(`${COMMENT_SELECT} where c.id = $1`, [newId])).rows[0]!;
+    const row = (await query<CommentRow>(
+      `${commentSelect(2)} where c.id = $1`, [newId, gate.authorId])).rows[0]!;
     return c.json(shapeComment(row), 201);
+  });
+
+  /**
+   * 후기 댓글 수정 · 삭제 — 게시글 댓글과 같은 규칙이다(본인 것만, 나머지는 전부 404).
+   */
+  v1.patch('/reviews/:reviewId/comments/:commentId', async (c) => {
+    const gate = requireAuth(c);
+    if (gate instanceof Response) return gate;
+    const reviewId = parseReviewId(c.req.param('reviewId'));
+    const commentId = parseCommentId(c.req.param('commentId'));
+    if (reviewId == null || commentId == null) {
+      return c.json({ error: 'not_found', message: '댓글을 찾을 수 없습니다.' }, 404);
+    }
+
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400);
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
+    }
+    const raw = (payload as Record<string, unknown>).body;
+    const bodyText = typeof raw === 'string' ? raw.trim() : '';
+    if (!bodyText) return c.json({ error: 'missing_body', message: '댓글 내용은 비어 있을 수 없습니다.' }, 400);
+    if (bodyText.length > MAX_COMMENT_LEN) {
+      return c.json({ error: 'invalid_body', message: `댓글은 ${MAX_COMMENT_LEN}자 이하여야 합니다.` }, 400);
+    }
+
+    const updated = await query(
+      `update review_comments set body = $1
+        where id = $2 and review_id = $3 and author_id = $4`,
+      [bodyText, commentId, reviewId, gate.authorId]);
+    if (updated.rowCount === 0) {
+      return c.json({ error: 'not_found', message: '댓글을 찾을 수 없습니다.' }, 404);
+    }
+
+    const row = (await query<CommentRow>(
+      `${commentSelect(2)} where c.id = $1`, [commentId, gate.authorId])).rows[0]!;
+    return c.json(shapeComment(row));
+  });
+
+  /**
+   * 하드 삭제다 — 대댓글이 없어 남길 맥락이 없다(앱 팀 확인).
+   *
+   * ⚠️ **reviews.comment_count 를 같은 트랜잭션에서 줄인다.** 작성 때 +1 하고 있어서, 삭제만
+   *    하면 후기 카드의 댓글 수가 실제보다 많아진다(앱 팀 지적). 목록 응답의 commentCount 와
+   *    '추천순' 정렬이 이 카운터를 읽는다.
+   * ⚠️ greatest(…, 0) 으로 막는다. 카운터가 어긋난 과거 데이터에서 음수가 되면, 화면에
+   *    "-1개" 가 뜨고 추천순 정렬이 그 후기를 맨 뒤로 밀어 버린다.
+   */
+  v1.delete('/reviews/:reviewId/comments/:commentId', async (c) => {
+    const gate = requireAuth(c);
+    if (gate instanceof Response) return gate;
+    const reviewId = parseReviewId(c.req.param('reviewId'));
+    const commentId = parseCommentId(c.req.param('commentId'));
+    if (reviewId == null || commentId == null) {
+      return c.json({ error: 'not_found', message: '댓글을 찾을 수 없습니다.' }, 404);
+    }
+
+    const removed = await withTransaction(async (client) => {
+      const del = await client.query(
+        'delete from review_comments where id = $1 and review_id = $2 and author_id = $3',
+        [commentId, reviewId, gate.authorId]);
+      if (del.rowCount === 0) return false;
+      await client.query(
+        'update reviews set comment_count = greatest(comment_count - 1, 0) where id = $1',
+        [reviewId]);
+      return true;
+    });
+    if (!removed) return c.json({ error: 'not_found', message: '댓글을 찾을 수 없습니다.' }, 404);
+    return c.body(null, 204);
   });
 
   // ── 플랜(021) ───────────────────────────────────────────────────────────────
@@ -2062,6 +2156,20 @@ export function buildApp(): Hono<AppEnv> {
 
   /** 게시글 본문 상한. 후기(2000)보다 넉넉하다 — 게시글은 글 자체가 목적이다. */
   const MAX_POST_BODY = 5000
+  /**
+   * 경로의 postId 를 uuid 로. 형식이 틀리면 null (404 로 응답한다).
+   *
+   * ⚠️ 이 가드가 없으면 `/v1/posts/abc` 가 **500** 이 된다 — Postgres 가 'abc' 를 uuid 로
+   *    바꾸다 실패하기 때문이다. 형식이 틀린 id 는 "없는 글" 이고, 없는 글은 404 다.
+   *    앱이 "404 하나로 분기" 할 수 있어야 한다(앱 팀 요청).
+   */
+  const parsePostId = (raw: string | undefined): string | null =>
+    raw && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(raw)
+      ? raw : null
+
+  const postNotFound = { error: 'not_found', message: '게시글을 찾을 수 없습니다.' } as const
+  const commentNotFound = { error: 'not_found', message: '댓글을 찾을 수 없습니다.' } as const
+
   const MAX_POST_PLACES = 20
   const MAX_POST_IMAGES = 5
 
@@ -2190,7 +2298,8 @@ export function buildApp(): Hono<AppEnv> {
   })
 
   v1.get('/posts/:postId', async (c) => {
-    const postId = c.req.param('postId') ?? ''
+    const postId = parsePostId(c.req.param('postId'))
+    if (postId == null) return c.json(postNotFound, 404)
     // 보는 사람 = 세션의 계정. 비로그인이면 null 이고 likedByMe 는 false 가 된다.
     const viewerId = authorOf(c)
     const post = (await query<Record<string, unknown>>(
@@ -2294,7 +2403,8 @@ export function buildApp(): Hono<AppEnv> {
   v1.patch('/posts/:postId', async (c) => {
     const gate = requireAuth(c)
     if (gate instanceof Response) return gate
-    const postId = c.req.param('postId') ?? ''
+    const postId = parsePostId(c.req.param('postId'))
+    if (postId == null) return c.json(postNotFound, 404)
 
     let payload: unknown
     try {
@@ -2403,8 +2513,10 @@ export function buildApp(): Hono<AppEnv> {
     const authorId: number | null = gate.authorId
     if (authorId == null) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
 
+    const postId = parsePostId(c.req.param('postId'))
+    if (postId == null) return c.json(postNotFound, 404)
     const result = await query('delete from posts where id = $1 and author_id = $2',
-      [c.req.param('postId'), authorId])
+      [postId, authorId])
     if (result.rowCount === 0) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
     return c.body(null, 204)
   })
@@ -2455,9 +2567,10 @@ export function buildApp(): Hono<AppEnv> {
     const gate = requireAuth(c)
     if (gate instanceof Response) return gate
 
-    const postId = c.req.param('postId') ?? ''
+    const postId = parsePostId(c.req.param('postId'))
+    if (postId == null) return c.json(postNotFound, 404)
     const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
-    if (!exists) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+    if (!exists) return c.json(postNotFound, 404)
 
     if (liked) {
       const authorId = gate.authorId
@@ -2644,7 +2757,8 @@ export function buildApp(): Hono<AppEnv> {
   // 오래된 순 — 대화 순서다(리뷰 댓글과 같다).
   v1.get('/posts/:postId/comments', async (c) => {
     const { limit, offset } = paging(c)
-    const postId = c.req.param('postId') ?? ''
+    const postId = parsePostId(c.req.param('postId'))
+    if (postId == null) return c.json(postNotFound, 404)
     const total = (await query<{ n: number }>(
       'select count(*)::int n from post_comments where post_id = $1', [postId])).rows[0]!.n
     // 보는 사람 = 세션의 계정. 목록 자체는 공개라 비로그인이면 null 이고 isMine 은 false 다.
@@ -2681,10 +2795,10 @@ export function buildApp(): Hono<AppEnv> {
       return c.json({ error: 'body_too_long', message: '댓글은 1000자 이하여야 합니다.' }, 400)
     }
 
-    const postId = c.req.param('postId') ?? ''
+    const postId = parsePostId(c.req.param('postId'))
+    if (postId == null) return c.json(postNotFound, 404)
     const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
-    if (!exists) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
-
+    if (!exists) return c.json(postNotFound, 404)
 
     const commentId = await withTransaction(async (client) => {
       // 작성자는 세션의 계정이다(030). 닉네임을 보냈으면 갱신한다.
@@ -2702,6 +2816,68 @@ export function buildApp(): Hono<AppEnv> {
       `${postCommentSelect(2)} where c.id = $1`, [commentId, gate.authorId])).rows[0]!
     await notifyPostActor(postId, gate.authorId, 'comment', body, String(commentId))
     return c.json(shapePostComment(comment), 201)
+  })
+
+  /**
+   * 게시글 댓글 수정 · 삭제 — **본인 것만**(앱 팀 요청).
+   *
+   * 남의 것·없는 것·형식이 틀린 것 모두 **404** 다. 403 으로 갈라 주면 앱 분기가 둘로 늘고,
+   * "있지만 남의 것" 이라는 사실이 새어 나간다 — 게시글 수정·삭제와 같은 규칙이다.
+   *
+   * 소유자 조건을 update/delete 문에 함께 넣어 0행이면 404 로 떨어뜨린다. 먼저 조회해서
+   * 비교하면 그 사이에 남이 지울 수 있다(경합).
+   */
+  v1.patch('/posts/:postId/comments/:commentId', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const postId = parsePostId(c.req.param('postId'))
+    const commentId = parseCommentId(c.req.param('commentId'))
+    if (postId == null) return c.json(postNotFound, 404)
+    if (commentId == null) return c.json(commentNotFound, 404)
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400)
+    }
+    const body = typeof (payload as Record<string, unknown>).body === 'string'
+      ? ((payload as Record<string, unknown>).body as string).trim() : ''
+    // 검증은 작성과 같다(앱 팀 요청). 빈 값을 허용하면 수정이 사실상 두 번째 삭제 경로가 된다.
+    if (!body) return c.json({ error: 'missing_body', message: '댓글은 비어 있을 수 없습니다.' }, 400)
+    if (body.length > 1000) {
+      return c.json({ error: 'body_too_long', message: '댓글은 1000자 이하여야 합니다.' }, 400)
+    }
+
+    const updated = await query(
+      `update post_comments set body = $1
+        where id = $2 and post_id = $3 and author_id = $4`,
+      [body, commentId, postId, gate.authorId])
+    if (updated.rowCount === 0) return c.json(commentNotFound, 404)
+
+    const row = (await query<Record<string, unknown>>(
+      `${postCommentSelect(2)} where c.id = $1`, [commentId, gate.authorId])).rows[0]!
+    return c.json(shapePostComment(row))
+  })
+
+  //  하드 삭제다 — 대댓글이 없어 남길 맥락이 없다(앱 팀 확인). 게시글의 commentCount 는
+  //   저장된 카운터가 아니라 조회마다 세는 값이라(POST_SELECT) 따로 줄일 것이 없다.
+  v1.delete('/posts/:postId/comments/:commentId', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const postId = parsePostId(c.req.param('postId'))
+    const commentId = parseCommentId(c.req.param('commentId'))
+    if (postId == null) return c.json(postNotFound, 404)
+    if (commentId == null) return c.json(commentNotFound, 404)
+
+    const deleted = await query(
+      'delete from post_comments where id = $1 and post_id = $2 and author_id = $3',
+      [commentId, postId, gate.authorId])
+    if (deleted.rowCount === 0) return c.json(commentNotFound, 404)
+    return c.body(null, 204)
   })
 
   app.route('/v1', v1);

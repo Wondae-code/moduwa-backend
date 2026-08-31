@@ -40,8 +40,8 @@ X-Session-Token: <SESSION_TOKEN>
 | 저장 | `GET /v1/saved-places`, `PUT/DELETE /v1/saved-places/:contentId` |
 | 게시글 목록의 내 것 필터 | `GET /v1/posts?mine=true`, `?liked=true` |
 
-**보는 사람 기준 파생 값.** 게시글(목록·단건·생성·수정)과 게시글 댓글 응답에는 `likedByMe`와
-`isMine`이 함께 실립니다. 둘 다 **세션이 누구인지**로 계산하고, 비로그인은 둘 다 `false`입니다
+**보는 사람 기준 파생 값.** 게시글(목록·단건·생성·수정)과 댓글(게시글 댓글·후기 댓글) 응답에는
+`isMine`이, 게시글과 후기에는 `likedByMe`가 실립니다. 둘 다 **세션이 누구인지**로 계산하고, 비로그인은 둘 다 `false`입니다
 (`null`이 아닙니다). `isMine`은 수정·삭제 메뉴를 띄울지 판단하는 값입니다 — 닉네임 비교로
 대신하면 동명이인에서 틀립니다.
 
@@ -665,6 +665,14 @@ curl -X POST "$BASE/v1/reviews" \
 - `likeCount` 는 `reviews.like_count` 컬럼이다. 시연 시드값을 버리지 않고 그 위에 ±1 누적한다
   (post_likes 처럼 0 부터 세면 시드 좋아요가 사라지고 '좋아요 순' 정렬 인덱스도 못 쓴다).
 - 오류: `invalid_reviewId`(400) · `not_found`(404) · `login_required`(401)
+
+### PATCH · DELETE /v1/reviews/:reviewId/comments/:commentId — 후기 댓글 수정·삭제  🔒
+`PATCH {body}` → 200(갱신된 댓글), `DELETE` → **204**. **본인 것만** 됩니다.
+
+- 남의 것·없는 것·형식이 틀린 id 모두 **404**입니다(403이 아닙니다 — 앱 분기가 하나로 끝나고 존재 여부도 새지 않습니다)
+- 검증은 작성과 같습니다. 빈 `body`는 400 — 수정이 두 번째 삭제 경로가 되지 않게 합니다
+- 하드 삭제입니다(대댓글이 없어 남길 맥락이 없습니다). 되돌릴 수 없습니다
+- ⚠️ 삭제는 `reviews.comment_count`를 **같은 트랜잭션에서 -1** 합니다. 목록의 `commentCount`와 `sort=recommended`가 이 카운터를 읽으므로, 줄이지 않으면 후기 카드의 댓글 수가 실제보다 많아집니다. 남의 것을 지우려다 404가 난 경우에는 줄지 않습니다
 
 ### POST /v1/reviews/:reviewId/comments — 댓글 작성
 작성자 식별은 리뷰 작성과 **같은 규칙**이다 — 기기 UUID + 닉네임, 처음 쓰는 기기면 `authorNm` 필수.
