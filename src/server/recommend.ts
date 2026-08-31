@@ -104,6 +104,12 @@ export type RecommendInput = {
   themes?: string[];
   budget?: 'low' | 'medium' | 'high';
   dayTripOnly?: boolean;
+  /**
+   * 시안 4/6 "덜 붐볐으면 좋겠어요". 혼잡일 감점·한산일 보너스의 **세기를 키운다.**
+   * 기본(false·미전송)은 지금 동작 그대로다 — 혼잡도를 아예 무시하는 것이 아니라,
+   * 사용자가 명시적으로 고르면 더 강하게 반영한다.
+   */
+  avoidCrowds?: boolean;
 };
 
 export type RecommendNote =
@@ -343,6 +349,7 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
 
   const w = await weights();
   const party = (input.party ?? []).filter((p): p is PartyKind => PARTY_KINDS.has(p));
+  const avoid = input.avoidCrowds === true;
   const notes: RecommendNote[] = [];
 
   const all = await collectCandidates(region, party, input.themes ?? [], w);
@@ -435,10 +442,12 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
           let s = c.score;
           // 인기순위는 볼거리를 고를 때만 쓴다(위 주석).
           if (slot === 'spot') s += c.hub_bonus;
-          // 혼잡일 보정 — 유명한 곳일수록 크게 깎는다(hub_rank 가 있는 24% 에만 적용된다)
+          // 혼잡일 보정 — 유명한 곳일수록 크게 깎는다(hub_rank 가 있는 24% 에만 적용된다).
+          //  avoidCrowds 를 고르면 같은 방향으로 더 세게 민다(값은 설정에서 온다).
           if (c.hub_rank != null) {
-            s += busy ? -(w.get('congestion.busy_penalty') ?? 15)
-                      : (w.get('congestion.quiet_bonus') ?? 10);
+            s += busy
+              ? -(avoid ? (w.get('congestion.avoid_busy_penalty') ?? 35) : (w.get('congestion.busy_penalty') ?? 15))
+              : (avoid ? (w.get('congestion.avoid_quiet_bonus') ?? 22) : (w.get('congestion.quiet_bonus') ?? 10));
           }
           // 이동 거리 — 직전 장소에서 멀수록 감점. Directions 없이 하루 동선을 뭉치는 장치다.
           if (prev) s -= Math.min(30, distKm(prev, c) * 1.5);

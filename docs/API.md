@@ -758,6 +758,7 @@ curl -X POST "$BASE/v1/reviews/images" \
 | `themes` | | `GET /v1/plan-options`의 테마 코드. 목록 밖은 **400** |
 | `budget` | | `low`·`medium`·`high` — 숙소 가격대 |
 | `dayTripOnly` | | `true`면 숙소를 고르지 않음 |
+| `avoidCrowds` | | `true`면 혼잡일 회피를 **더 세게** 반영. 미전송·`false`는 기존 동작 그대로 |
 
 ```json
 {

@@ -80,7 +80,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/review-tags',
       '🔒 POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm?, tags?, wouldRevisit?, imageURLs?}',
       '🔒 POST /v1/reviews/:reviewId/comments  {body, authorNm?}',
-      '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?}',
+      '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?, avoidCrowds?}',
       '🔒 GET /v1/plans',
       '🔒 GET /v1/plans/:planId',
       '🔒 PUT /v1/plans/:planId  {authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
@@ -95,6 +95,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/posts?mine=&liked=&contentId=&limit=&offset=  (mine·liked 는 🔒)',
       'GET /v1/posts/:postId',
       '🔒 POST /v1/posts  {body, authorNm?, imageURLs?, places?, accessFeatures?}',
+      '🔒 PATCH /v1/posts/:postId  {body?, imageURLs?, accessFeatures?, places?}',
       '🔒 DELETE /v1/posts/:postId',
       '🔒 PUT /v1/posts/:postId/like',
       '🔒 DELETE /v1/posts/:postId/like',
@@ -102,6 +103,9 @@ export function buildApp(): Hono<AppEnv> {
       '🔒 DELETE /v1/reviews/:reviewId/like',
       'GET /v1/posts/:postId/comments',
       '🔒 POST /v1/posts/:postId/comments  {body, authorNm?}',
+      '🔒 POST /v1/reviews/:reviewId/report  {reason, detail?}',
+      '🔒 POST /v1/devices  {token, platform?, environment, bundleId?}',
+      '🔒 DELETE /v1/devices/:token',
       '',
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
@@ -1456,6 +1460,8 @@ export function buildApp(): Hono<AppEnv> {
       themes,
       budget: (budget || undefined) as RecommendInput['budget'],
       dayTripOnly: p.dayTripOnly === true,
+      // 시안 4/6 "덜 붐볐으면 좋겠어요" — 혼잡일 회피 세기를 키운다.
+      avoidCrowds: p.avoidCrowds === true,
     }
     if (!input.region && !input.regionCode) {
       return c.json({ error: 'missing_region', message: 'region(슬러그) 또는 regionCode 가 필요합니다.' }, 400)
@@ -2236,6 +2242,122 @@ export function buildApp(): Hono<AppEnv> {
     return c.json({ ...shapePost(post), places: (await loadPostPlaces([postId])).get(postId) ?? [] }, 201)
   })
 
+  /**
+   * 게시글 수정 — 본인 글만. 온 키만 갱신한다.
+   *
+   * ⚠️ 남의 글이면 403 이 아니라 **404** 다 — 삭제 라우트와 같은 규칙이라 앱의 분기가
+   *    하나로 끝나고, 남의 글 존재 여부도 새어 나가지 않는다.
+   * ⚠️ 배열은 부분 병합이 아니라 **통째 교체**다(플랜 저장과 같은 판단). 부분 병합 API 는
+   *    클라이언트가 순서를 맞추다 중간 상태를 저장하게 만든다.
+   * ⚠️ authorNm 을 받지 않는다. 프로필 편집(042)이 생겼으니 글을 고친다고 닉네임이 따라
+   *    바뀌면 안 된다 — 생성 라우트의 부수효과는 하위호환으로 남겨 둔다.
+   */
+  v1.patch('/posts/:postId', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const postId = c.req.param('postId') ?? ''
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400)
+    }
+    const p = payload as Record<string, unknown>
+    const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+
+    // ── 검증은 생성과 동일하다. 온 키만 본다.
+    const sets: string[] = []
+    const vals: unknown[] = [postId, gate.authorId]
+    const add = (sql: string, v: unknown) => { vals.push(v); sets.push(sql.replace('?', `$${vals.length}`)) }
+
+    if (p.body !== undefined) {
+      const body = str(p.body)
+      if (!body) return c.json({ error: 'missing_body', message: '내용은 비어 있을 수 없습니다.' }, 400)
+      if (body.length > MAX_POST_BODY) {
+        return c.json({ error: 'body_too_long', message: `내용은 ${MAX_POST_BODY}자 이하여야 합니다.` }, 400)
+      }
+      add('body = ?', body)
+    }
+
+    if (p.imageURLs !== undefined) {
+      if (!Array.isArray(p.imageURLs)) {
+        return c.json({ error: 'invalid_body', message: 'imageURLs 는 배열이어야 합니다.' }, 400)
+      }
+      const imageURLs = p.imageURLs.filter((u): u is string => typeof u === 'string')
+      if (imageURLs.length > MAX_POST_IMAGES) {
+        return c.json({ error: 'too_many_images', message: `사진은 ${MAX_POST_IMAGES}장 이하여야 합니다.` }, 400)
+      }
+      add('image_urls = ?', imageURLs)
+    }
+
+    if (p.accessFeatures !== undefined) {
+      if (!Array.isArray(p.accessFeatures)) {
+        return c.json({ error: 'invalid_body', message: 'accessFeatures 는 배열이어야 합니다.' }, 400)
+      }
+      // 값은 검증하지 않는다(생성과 같은 판단 — 앱이 아이콘을 늘리면 서버 배포 없이 따라간다).
+      const features = [...new Set(
+        p.accessFeatures.filter((v) => typeof v === 'string' && v.trim()).map(String),
+      )].slice(0, 10)
+      add('access_features = ?', features)
+    }
+
+    // places 는 별도 테이블이라 위 set 목록에 넣을 수 없다. 온 경우에만 통째로 갈아낀다.
+    let places: { contentID: string; name: string; region: string }[] | null = null
+    if (p.places !== undefined) {
+      if (!Array.isArray(p.places)) {
+        return c.json({ error: 'invalid_body', message: 'places 는 배열이어야 합니다.' }, 400)
+      }
+      if (p.places.length > MAX_POST_PLACES) {
+        return c.json({ error: 'too_many_places', message: `장소는 ${MAX_POST_PLACES}곳 이하여야 합니다.` }, 400)
+      }
+      places = p.places.map((v) => {
+        const o = (v ?? {}) as Record<string, unknown>
+        return { contentID: str(o.contentID), name: str(o.name), region: str(o.region) }
+      })
+      if (places.some((pl) => !pl.contentID || !pl.name)) {
+        return c.json({ error: 'invalid_place', message: '장소는 contentID 와 name 이 필요합니다.' }, 400)
+      }
+    }
+
+    if (sets.length === 0 && places === null) {
+      return c.json({ error: 'nothing_to_update', message: '바꿀 항목이 없습니다.' }, 400)
+    }
+
+    const ok = await withTransaction(async (client) => {
+      // 소유자 조건을 update 에 함께 넣어 남의 글은 0행이 되게 한다(삭제 라우트와 같은 방식).
+      //  places 만 오는 요청에도 소유권 확인이 필요하므로 updated_at 은 항상 갱신한다.
+      const res = await client.query(
+        `update posts set ${[...sets, 'updated_at = now()'].join(', ')}
+          where id = $1 and author_id = $2`,
+        vals,
+      )
+      if (res.rowCount === 0) return false
+
+      if (places !== null) {
+        await client.query('delete from post_places where post_id = $1', [postId])
+        for (const [i, pl] of places.entries()) {
+          await client.query(
+            `insert into post_places (post_id, position, content_id, place_name, region)
+             values ($1, $2, $3, $4, $5)`,
+            [postId, i, pl.contentID, pl.name, pl.region || null],
+          )
+        }
+      }
+      return true
+    })
+    if (!ok) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
+
+    // 응답은 생성과 같은 모양 — 앱이 목록 카드와 상세를 한 번에 갱신한다.
+    const post = (await query<Record<string, unknown>>(
+      `${postSelect(2)} where p.id = $1`, [postId, gate.authorId],
+    )).rows[0]!
+    return c.json({ ...shapePost(post), places: (await loadPostPlaces([postId])).get(postId) ?? [] })
+  })
+
   v1.delete('/posts/:postId', async (c) => {
     const gate = requireAuth(c)
     if (gate instanceof Response) return gate
@@ -2318,6 +2440,107 @@ export function buildApp(): Hono<AppEnv> {
 
   v1.put('/reviews/:reviewId/like', (c) => setReviewLike(c, true))
   v1.delete('/reviews/:reviewId/like', (c) => setReviewLike(c, false))
+
+  // ── 후기 신고 ───────────────────────────────────────────────────────────────
+  //  ⚠️ **신고가 후기를 감추지 않는다.** 처리는 운영 판단이고, 자동으로 숨기면 신고 버튼이
+  //     "남의 글을 지우는 도구" 가 된다. 앱도 신고 후 그 후기를 그대로 보여준다.
+  //  사유는 앱이 쥔 고정 6종이다. 화이트리스트로 막는 이유는 화면에 없는 사유가 통계에 섞이면
+  //  운영이 판단할 수 없기 때문이다(값 자유도를 주는 accessFeatures 와 반대 판단).
+  const REPORT_REASONS = new Set(['spam', 'abuse', 'falseInfo', 'privacyLeak', 'irrelevant', 'other'])
+  const MAX_REPORT_DETAIL = 300
+
+  v1.post('/reviews/:reviewId/report', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    const reviewId = parseReviewId(c.req.param('reviewId') ?? '')
+    if (reviewId == null) return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404)
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    const p = (payload ?? {}) as Record<string, unknown>
+    const reason = typeof p.reason === 'string' ? p.reason.trim() : ''
+    if (!REPORT_REASONS.has(reason)) {
+      return c.json({ error: 'invalid_reason', message: '신고 사유가 올바르지 않습니다.' }, 400)
+    }
+    const detail = typeof p.detail === 'string' ? p.detail.trim().slice(0, MAX_REPORT_DETAIL) : null
+
+    const exists = (await query('select 1 from reviews where id = $1', [reviewId])).rowCount
+    if (!exists) return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404)
+
+    // 같은 사람의 재신고는 새 행이 아니라 갱신이다 — 멱등하게 204 를 준다(좋아요와 같은 판단).
+    await query(
+      `insert into review_reports (review_id, author_id, reason, detail)
+       values ($1, $2, $3, $4)
+         on conflict (review_id, author_id)
+         do update set reason = excluded.reason, detail = excluded.detail, updated_at = now()`,
+      [reviewId, gate.authorId, reason, detail || null],
+    )
+    return c.body(null, 204)
+  })
+
+  // ── 푸시 알림 기기 토큰(044) ────────────────────────────────────────────────
+  //  발송 코드는 APNs 인증 키(.p8)가 도착한 뒤에 붙는다. 등록은 그와 독립이라 먼저 연다 —
+  //  앱이 권한 요청·등록을 먼저 붙일 수 있고, 키가 오면 대상이 이미 쌓여 있다.
+  const DEVICE_ENVIRONMENTS = new Set(['sandbox', 'production'])
+
+  v1.post('/devices', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    const p = (payload ?? {}) as Record<string, unknown>
+    const token = typeof p.token === 'string' ? p.token.trim() : ''
+    // APNs 기기 토큰은 hex 문자열이다. 형식을 막아 두면 잘못된 값이 발송 대상에 쌓이지 않는다.
+    if (!/^[0-9a-fA-F]{32,200}$/.test(token)) {
+      return c.json({ error: 'invalid_token', message: '기기 토큰 형식이 올바르지 않습니다.' }, 400)
+    }
+    const environment = typeof p.environment === 'string' ? p.environment.trim() : ''
+    // ⚠️ 여기서 막지 않으면 잘못된 게이트웨이로 보내 BadDeviceToken 으로 **조용히** 실패한다.
+    if (!DEVICE_ENVIRONMENTS.has(environment)) {
+      return c.json({
+        error: 'invalid_environment',
+        message: "environment 는 'sandbox' 또는 'production' 이어야 합니다.",
+      }, 400)
+    }
+    const platform = typeof p.platform === 'string' && p.platform.trim() ? p.platform.trim() : 'ios'
+    const bundleId = typeof p.bundleId === 'string' ? p.bundleId.trim() : ''
+
+    // 토큰이 PK 라 재등록은 upsert 다. **author_id 까지 갱신**하는 것이 중요하다 —
+    //  한 기기를 다른 계정으로 로그인하면 소유자가 바뀌어야 하고, 안 그러면 로그아웃한
+    //  사람에게 알림이 계속 간다.
+    await query(
+      `insert into device_tokens (token, author_id, platform, environment, bundle_id)
+       values ($1, $2, $3, $4, $5)
+         on conflict (token) do update
+           set author_id = excluded.author_id, platform = excluded.platform,
+               environment = excluded.environment, bundle_id = excluded.bundle_id,
+               updated_at = now()`,
+      [token, gate.authorId, platform, environment, bundleId || null],
+    )
+    return c.body(null, 204)
+  })
+
+  //  해제는 로그아웃·알림 스위치 끄기에서 부른다. 남의 토큰을 지우지 못하게 소유자 조건을 건다.
+  //   없는 토큰도 204 다 — 이미 없는 것을 지우려는 요청에 오류를 줄 이유가 없다(멱등).
+  v1.delete('/devices/:token', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    await query(
+      'delete from device_tokens where token = $1 and author_id = $2',
+      [c.req.param('token') ?? '', gate.authorId],
+    )
+    return c.body(null, 204)
+  })
 
   // ── 게시글 댓글 ─────────────────────────────────────────────────────────────
 
