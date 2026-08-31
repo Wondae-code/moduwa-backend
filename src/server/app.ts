@@ -731,6 +731,7 @@ export function buildApp(): Hono<AppEnv> {
            r.would_revisit as "wouldRevisit",
            to_char(r.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            a.nickname as author_nickname,
+           a.avatar_url as author_avatar,
            (select count(*)::int from reviews r2 where r2.author_id = r.author_id) as author_review_count,
            -- 후기 뱃지용 태그(019). 시안은 뱃지에 짧은 이름을 쓰지만 긴 이름도 함께 보내
            -- 클라이언트가 상황에 맞게 고르게 한다. 태그가 없으면 빈 배열.
@@ -747,17 +748,24 @@ export function buildApp(): Hono<AppEnv> {
     author: string;
     author_nickname: string | null;
     author_review_count: number | null;
+    author_avatar: string | null;
   };
 
   // 기존 응답 필드는 그대로 두고(iOS 라이브 사용 중) 작성자 프로필만 authorInfo 로 덧붙인다.
   //  · author  : 레거시 문자열(닉네임). 제거하면 iOS ReviewDTO 디코딩이 깨진다.
   //  · authorInfo: {nickname, reviewCount, level} — 시안의 "닉네임 / Level N / N개의 리뷰"용.
   const shapeReview = (row: ReviewRow) => {
-    const { author_nickname: nickname, author_review_count: count, ...rest } = row;
+    const { author_nickname: nickname, author_review_count: count, author_avatar: avatar, ...rest } = row;
     const reviewCount = count ?? 0;
     return {
       ...rest,
-      authorInfo: { nickname: nickname ?? row.author, reviewCount, level: levelFor(reviewCount) },
+      authorInfo: {
+        nickname: nickname ?? row.author, reviewCount, level: levelFor(reviewCount),
+        // 042. author_id 가 없는 레거시 행은 조인이 안 되어 null 이다 — 앱이 이니셜 원을 그린다.
+        //  toHttps 로 감싸는 이유: 저장 시 https 만 받지만, 나중에 CDN 이 붙어 호스트가 바뀌어도
+        //  같은 정규화를 타게 해 둔다(A14 의 교훈 — 섞인 스킴은 조용히 안 보인다).
+        avatarUrl: toHttps(avatar),
+      },
     };
   };
 
@@ -1053,19 +1061,24 @@ export function buildApp(): Hono<AppEnv> {
   const COMMENT_SELECT = `
     select c.id, c.body,
            to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
-           a.nickname as author,
+           a.nickname as author, a.avatar_url as author_avatar,
            (select count(*)::int from reviews r2 where r2.author_id = c.author_id) as author_review_count
       from review_comments c
       join authors a on a.id = c.author_id`;
 
-  type CommentRow = Record<string, unknown> & { author: string; author_review_count: number | null };
+  type CommentRow = Record<string, unknown> & {
+    author: string; author_review_count: number | null; author_avatar: string | null;
+  };
 
   const shapeComment = (row: CommentRow) => {
-    const { author_review_count: count, ...rest } = row;
+    const { author_review_count: count, author_avatar: avatar, ...rest } = row;
     const reviewCount = count ?? 0;
     return {
       ...rest,
-      authorInfo: { nickname: row.author, reviewCount, level: levelFor(reviewCount) },
+      authorInfo: {
+        nickname: row.author, reviewCount, level: levelFor(reviewCount),
+        avatarUrl: toHttps(avatar),
+      },
     };
   };
 
@@ -2023,7 +2036,7 @@ export function buildApp(): Hono<AppEnv> {
   const POST_SELECT = `
     select p.id, p.body, p.image_urls as "imageURLs",
            p.access_features as "accessFeatures",
-           a.nickname as author,
+           a.nickname as author, a.avatar_url as author_avatar,
            (select count(*)::int from post_likes pl where pl.post_id = p.id) as "likeCount",
            (select count(*)::int from post_comments pc where pc.post_id = p.id) as "commentCount",
            exists (
@@ -2038,6 +2051,22 @@ export function buildApp(): Hono<AppEnv> {
   /** 보는 사람 자리를 실제 파라미터 번호로 바꿔 준다. */
   const postSelect = (viewerParam: number) =>
     POST_SELECT.replace('$VIEWER', `$${viewerParam}`)
+
+  /**
+   * 게시글 한 건에 작성자 프로필을 덧붙인다(042).
+   *
+   * ⚠️ **기존 `author` 문자열은 그대로 둔다** — iOS 가 라이브로 쓰고 있어 제거하면 디코딩이
+   *    깨진다. 후기(shapeReview)가 authorInfo 로 덧붙인 것과 같은 패턴이라 앱이 파서를
+   *    공유할 수 있다. reviewCount·level 은 게시글 화면에 쓰이지 않아 넣지 않는다(앱 팀 확인).
+   */
+  const shapePost = (row: Record<string, unknown>) => {
+    const { author_avatar: avatar, ...rest } = row as { author_avatar?: string | null }
+      & Record<string, unknown>
+    return {
+      ...rest,
+      authorInfo: { nickname: rest.author as string, avatarUrl: toHttps(avatar ?? null) },
+    }
+  }
 
   /** 여러 게시글의 장소를 한 방에 읽어 id 별로 묶는다. */
   const loadPostPlaces = async (postIds: string[]) => {
@@ -2111,7 +2140,7 @@ export function buildApp(): Hono<AppEnv> {
       `${postSelect(1)} ${where} order by ${order} limit ${limit} offset ${offset}`, params,
     )).rows
     const places = await loadPostPlaces(rows.map((r) => r.id as string))
-    const items = rows.map((r) => ({ ...r, places: places.get(r.id as string) ?? [] }))
+    const items = rows.map((r) => ({ ...shapePost(r), places: places.get(r.id as string) ?? [] }))
     return c.json({ count: items.length, limit, offset, items })
   })
 
@@ -2123,7 +2152,7 @@ export function buildApp(): Hono<AppEnv> {
       `${postSelect(2)} where p.id = $1`, [postId, viewerId],
     )).rows[0]
     if (!post) return c.json({ error: 'not_found', message: '게시글을 찾을 수 없습니다.' }, 404)
-    return c.json({ ...post, places: (await loadPostPlaces([postId])).get(postId) ?? [] })
+    return c.json({ ...shapePost(post), places: (await loadPostPlaces([postId])).get(postId) ?? [] })
   })
 
   /**
@@ -2204,7 +2233,7 @@ export function buildApp(): Hono<AppEnv> {
     const post = (await query<Record<string, unknown>>(
       `${postSelect(2)} where p.id = $1`, [postId, gate.authorId],
     )).rows[0]!
-    return c.json({ ...post, places: (await loadPostPlaces([postId])).get(postId) ?? [] }, 201)
+    return c.json({ ...shapePost(post), places: (await loadPostPlaces([postId])).get(postId) ?? [] }, 201)
   })
 
   v1.delete('/posts/:postId', async (c) => {
@@ -2293,10 +2322,20 @@ export function buildApp(): Hono<AppEnv> {
   // ── 게시글 댓글 ─────────────────────────────────────────────────────────────
 
   const POST_COMMENT_SELECT = `
-    select c.id, a.nickname as author, c.body,
+    select c.id, a.nickname as author, a.avatar_url as author_avatar, c.body,
            to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt"
       from post_comments c
       join authors a on a.id = c.author_id`
+
+  /** 게시글 댓글에 작성자 프로필을 덧붙인다(042). 내부 컬럼명이 새어 나가지 않게 감싼다. */
+  const shapePostComment = (row: Record<string, unknown>) => {
+    const { author_avatar: avatar, ...rest } = row as { author_avatar?: string | null }
+      & Record<string, unknown>
+    return {
+      ...rest,
+      authorInfo: { nickname: rest.author as string, avatarUrl: toHttps(avatar ?? null) },
+    }
+  }
 
   // 오래된 순 — 대화 순서다(리뷰 댓글과 같다).
   v1.get('/posts/:postId/comments', async (c) => {
@@ -2308,7 +2347,9 @@ export function buildApp(): Hono<AppEnv> {
       `${POST_COMMENT_SELECT} where c.post_id = $1
         order by c.created_at limit ${limit} offset ${offset}`, [postId],
     )).rows
-    return c.json({ total, limit, offset, count: rows.length, items: rows })
+    return c.json({
+      total, limit, offset, count: rows.length, items: rows.map(shapePostComment),
+    })
   })
 
   /** 댓글은 사람에게 귀속되는 글이라 **닉네임이 필요하다**(좋아요와 다르다). */
@@ -2353,7 +2394,7 @@ export function buildApp(): Hono<AppEnv> {
 
     const comment = (await query<Record<string, unknown>>(
       `${POST_COMMENT_SELECT} where c.id = $1`, [commentId])).rows[0]!
-    return c.json(comment, 201)
+    return c.json(shapePostComment(comment), 201)
   })
 
   app.route('/v1', v1);

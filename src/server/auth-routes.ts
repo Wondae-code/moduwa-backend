@@ -18,6 +18,7 @@ import {
   setAccessFeatures,
   normalizeEmail,
   setEmailPassword,
+  updateProfile,
   signIn,
   signOutDevice,
 } from './accounts';
@@ -46,6 +47,9 @@ import { issueSession, revokeAuthorSessions, revokeDeviceSessions, revokeSession
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 254; // RFC 5321 의 주소 상한
 const MAX_NICKNAME_LENGTH = 40; // authors.nickname — 다른 라우트와 같은 상한
+// 프로필 사진 URL 상한. 우리 업로드 경로는 sha256 파일명이라 200자면 충분하고,
+//  검증하지 않는 문자열에 상한이 없으면 그대로 저장소가 된다(accessFeatures 와 같은 규칙).
+const MAX_AVATAR_URL_LENGTH = 300;
 const MAX_DEVICE_ID_LENGTH = 128; // app.ts 의 다른 쓰기 라우트와 같은 상한
 // 무장애 항목 개수 상한. 앱이 항목을 늘려도 서버 배포 없이 따라가야 하므로 값은 검증하지
 //  않지만(030 주석), 개수는 막는다 — 검증하지 않는 배열에 상한이 없으면 그대로 저장소가 된다.
@@ -108,12 +112,14 @@ type AuthorView = {
   /** 온보딩에서 고른 무장애 항목(030). 앱이 로컬 값과 맞추는 데 쓴다. */
   accessFeatures: string[];
   onboarded: boolean;
+  /** 프로필 사진(042). 없으면 null — 앱이 이니셜 원을 그린다. */
+  avatarUrl: string | null;
 };
 
 function viewOf(r: SignInResult): AuthorView {
   return {
     uuid: r.uuid, nickname: r.nickname, email: r.email, emailVerified: r.emailVerified,
-    accessFeatures: r.accessFeatures, onboarded: r.onboarded,
+    accessFeatures: r.accessFeatures, onboarded: r.onboarded, avatarUrl: r.avatarUrl,
   };
 }
 
@@ -155,6 +161,29 @@ function codeError(c: Context<AppEnv>, reason: 'invalid' | 'expired' | 'too_many
     return c.json({ error: 'code_attempts_exceeded', message: '시도 횟수를 초과했습니다. 코드를 다시 받아주세요.' }, 429);
   }
   return c.json({ error: 'invalid_code', message: '코드가 올바르지 않습니다.' }, 400);
+}
+
+/** 계정 한 건을 AuthorView 로 읽는다 — GET /me 와 PATCH /me 가 공유한다. */
+async function loadAuthorView(authorId: number): Promise<AuthorView | null> {
+  const row = (await query<{
+    uuid: string; nickname: string; email: string | null; verified: Date | null;
+    access_features: string[]; onboarded_at: Date | null; avatar_url: string | null;
+  }>(
+    `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at,
+            avatar_url
+       from authors where id = $1`,
+    [authorId],
+  )).rows[0];
+  if (!row) return null;
+  return {
+    uuid: row.uuid,
+    nickname: row.nickname,
+    email: row.email,
+    emailVerified: row.verified != null,
+    accessFeatures: row.access_features,
+    onboarded: row.onboarded_at != null,
+    avatarUrl: row.avatar_url,
+  };
 }
 
 /** 본문 파싱 — 다른 라우트와 같은 방식(JSON 객체가 아니면 400). */
@@ -494,24 +523,9 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const authorId = c.get('authorId');
     if (authorId == null) return c.json({ error: 'unauthenticated', message: '로그인 상태가 아닙니다.' }, 401);
 
-    const row = (await query<{
-      uuid: string; nickname: string; email: string | null; verified: Date | null;
-      access_features: string[]; onboarded_at: Date | null;
-    }>(
-      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at
-         from authors where id = $1`,
-      [authorId],
-    )).rows[0];
-    if (!row) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
-
-    return c.json({
-      uuid: row.uuid,
-      nickname: row.nickname,
-      email: row.email,
-      emailVerified: row.verified != null,
-      accessFeatures: row.access_features,
-      onboarded: row.onboarded_at != null,
-    } satisfies AuthorView);
+    const view = await loadAuthorView(authorId);
+    if (!view) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
+    return c.json(view);
   });
 
   // ── 무장애 프로필 수정 ─────────────────────────────────────────────────────
@@ -522,41 +536,68 @@ export function buildAuthRoutes(): Hono<AppEnv> {
 
     const p = await readBody(c);
     if (!p) return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
-    // 키가 없으면 바꿀 것이 없다. 빈 배열(= 필요한 것 없음)과 구분해야 하므로 undefined 를 본다.
-    if (p.accessFeatures === undefined) {
+
+    // 부분 갱신이다 — 온 키만 바꾼다. 세 값의 "없음" 이 서로 달라서 각각 따로 본다
+    //  (accounts.updateProfile 주석 참고).
+    const patch: { nickname?: string; avatarUrl?: string | null; features?: string[] } = {};
+
+    if (p.nickname !== undefined) {
+      if (typeof p.nickname !== 'string') {
+        return c.json({ error: 'invalid_nickname', message: '닉네임은 문자열이어야 합니다.' }, 400);
+      }
+      const nickname = p.nickname.trim();
+      // 빈 문자열은 "지우기" 가 아니라 잘못된 입력이다 — authors.nickname 은 not null 이고,
+      //  이름이 사라진 계정은 남의 글에서 작성자가 빈 칸으로 보인다.
+      if (!nickname) {
+        return c.json({ error: 'invalid_nickname', message: '닉네임을 입력해주세요.' }, 400);
+      }
+      if (nickname.length > MAX_NICKNAME_LENGTH) {
+        return c.json({ error: 'invalid_nickname', message: `닉네임은 ${MAX_NICKNAME_LENGTH}자 이하여야 합니다.` }, 400);
+      }
+      patch.nickname = nickname;
+    }
+
+    if (p.avatarUrl !== undefined) {
+      if (p.avatarUrl === null) {
+        patch.avatarUrl = null;   // 지우기 — 앱이 다시 이니셜 원을 그린다
+      } else if (typeof p.avatarUrl !== 'string') {
+        return c.json({ error: 'invalid_avatarUrl', message: 'avatarUrl 은 문자열이거나 null 이어야 합니다.' }, 400);
+      } else {
+        const url = p.avatarUrl.trim();
+        // https 만 받는다 — iOS ATS 가 평문 http 를 막아서, 저장은 되고 화면에는 안 뜨는
+        //  조용한 실패가 된다(A14 에서 겪은 그 문제).
+        if (!url.startsWith('https://') || url.length > MAX_AVATAR_URL_LENGTH) {
+          return c.json({
+            error: 'invalid_avatarUrl',
+            message: `avatarUrl 은 https 로 시작하는 ${MAX_AVATAR_URL_LENGTH}자 이하 URL 이어야 합니다.`,
+          }, 400);
+        }
+        patch.avatarUrl = url;
+      }
+    }
+
+    if (p.accessFeatures !== undefined) {
+      if (!Array.isArray(p.accessFeatures)) {
+        return c.json({ error: 'invalid_accessFeatures', message: 'accessFeatures 는 문자열 배열이어야 합니다.' }, 400);
+      }
+      // 값은 검증하지 않는다(앱이 항목을 늘려도 서버 배포 없이 따라가야 한다). 개수와 길이만 막는다.
+      patch.features = p.accessFeatures
+        .filter((v): v is string => typeof v === 'string' && v.length <= 40)
+        .slice(0, MAX_ACCESS_FEATURES);
+    }
+
+    // 세 키가 **모두** 없을 때만 거절한다. 예전에는 accessFeatures 하나만 봐서
+    //  닉네임만 바꾸려는 요청이 nothing_to_update 로 막혔다(앱 팀이 지적한 그 문제).
+    if (Object.keys(patch).length === 0) {
       return c.json({ error: 'nothing_to_update', message: '바꿀 항목이 없습니다.' }, 400);
     }
-    if (!Array.isArray(p.accessFeatures)) {
-      return c.json({ error: 'invalid_accessFeatures', message: 'accessFeatures 는 문자열 배열이어야 합니다.' }, 400);
-    }
 
-    // 값은 검증하지 않는다(앱이 항목을 늘려도 서버 배포 없이 따라가야 한다). 개수와 길이만 막는다 —
-    //  검증하지 않는 배열에 상한이 없으면 그대로 저장소가 된다(가입 라우트와 같은 규칙).
-    const features = p.accessFeatures
-      .filter((v): v is string => typeof v === 'string' && v.length <= 40)
-      .slice(0, MAX_ACCESS_FEATURES);
-
-    await setAccessFeatures(authorId, features);
-
-    const row = (await query<{
-      uuid: string; nickname: string; email: string | null; verified: Date | null;
-      access_features: string[]; onboarded_at: Date | null;
-    }>(
-      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at
-         from authors where id = $1`,
-      [authorId],
-    )).rows[0];
-    if (!row) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
+    await updateProfile(authorId, patch);
 
     // 갱신된 계정을 그대로 돌려준다 — 앱이 화면을 다시 그릴 때 재조회하지 않아도 되게.
-    return c.json({
-      uuid: row.uuid,
-      nickname: row.nickname,
-      email: row.email,
-      emailVerified: row.verified != null,
-      accessFeatures: row.access_features,
-      onboarded: row.onboarded_at != null,
-    } satisfies AuthorView);
+    const view = await loadAuthorView(authorId);
+    if (!view) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
+    return c.json(view);
   });
 
   return auth;

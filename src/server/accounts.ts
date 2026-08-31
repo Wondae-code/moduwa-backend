@@ -39,6 +39,8 @@ export type SignInResult = {
   /** 온보딩에서 고른 무장애 항목(030). 앱이 로컬 값과 맞추는 데 쓴다. */
   accessFeatures: string[];
   onboarded: boolean;
+  /** 프로필 사진(042). 로그인 직후에도 앱이 아바타를 바로 그릴 수 있게 함께 준다. */
+  avatarUrl: string | null;
 };
 
 // 새 계정에 닉네임이 없을 때의 값. authors.nickname 이 not null 이라 무언가는 있어야 하고,
@@ -177,9 +179,10 @@ export async function signIn(params: {
 
     const row = (await client.query<{
       uuid: string; nickname: string; email: string | null; verified: Date | null;
-      access_features: string[]; onboarded_at: Date | null;
+      access_features: string[]; onboarded_at: Date | null; avatar_url: string | null;
     }>(
-      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at
+      `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at,
+              avatar_url
          from authors where id = $1`,
       [authorId],
     )).rows[0]!;
@@ -187,6 +190,7 @@ export async function signIn(params: {
       authorId, uuid: row.uuid, nickname: row.nickname, created,
       email: row.email, emailVerified: row.verified != null,
       accessFeatures: row.access_features, onboarded: row.onboarded_at != null,
+      avatarUrl: row.avatar_url,
     };
   });
 }
@@ -210,6 +214,39 @@ export async function setEmailPassword(authorId: number, passwordHash: string): 
  * 온보딩을 마쳤다는 뜻이고, `onboarded_at` 이 비어 있으면 이때 찍는다 — 앱이 온보딩을 다시
  * 띄우지 않게 하려면 "고른 것이 없다"와 "고른 적이 없다"가 구분되어야 한다(030).
  */
+/**
+ * 프로필 편집 — 닉네임·아바타·무장애 항목을 **온 것만** 갱신한다.
+ *
+ * ⚠️ 세 값의 "없음" 이 서로 다르다.
+ *   · nickname   — undefined 면 그대로. 빈 문자열은 라우트가 이미 400 으로 막는다.
+ *   · avatarUrl  — undefined 면 그대로, **null 이면 지우기**(기본 아바타로 되돌림).
+ *   · features   — undefined 면 그대로, 빈 배열은 "필요한 것 없음" 이라는 유효한 값이다.
+ *  그래서 coalesce 한 방으로 합칠 수 없고 세 컬럼을 각각 다룬다.
+ *
+ * onboarded_at 은 features 가 실제로 온 경우에만 찍는다 — 프로필에서 닉네임만 바꾼 것을
+ * "온보딩을 마쳤다" 로 해석하면 앱이 온보딩을 다시 띄울 기회를 잃는다(030 주석과 같은 이유).
+ */
+export async function updateProfile(authorId: number, patch: {
+  nickname?: string;
+  avatarUrl?: string | null;
+  features?: string[];
+}): Promise<void> {
+  const sets: string[] = [];
+  const vals: unknown[] = [authorId];
+  const add = (sql: string, v: unknown) => { vals.push(v); sets.push(sql.replace('?', `$${vals.length}`)); };
+
+  if (patch.nickname !== undefined) add('nickname = ?', patch.nickname);
+  // null 도 유효한 값(지우기)이라 undefined 만 걸러낸다.
+  if (patch.avatarUrl !== undefined) add('avatar_url = ?', patch.avatarUrl);
+  if (patch.features !== undefined) {
+    add('access_features = ?', patch.features);
+    sets.push('onboarded_at = coalesce(onboarded_at, now())');
+  }
+  if (sets.length === 0) return;
+
+  await query(`update authors set ${sets.join(', ')} where id = $1`, vals);
+}
+
 export async function setAccessFeatures(authorId: number, features: string[]): Promise<void> {
   await query(
     `update authors

@@ -85,7 +85,7 @@ X-Session-Token: <SESSION_TOKEN>
     "uuid": "f5ee33a7-…", "nickname": "에이",
     "email": "me@example.com", "emailVerified": false,
     "accessFeatures": ["wheelchairAccessible", "elderlyFriendly"],
-    "onboarded": true
+    "onboarded": true, "avatarUrl": null
   },
   "created": true
 }
@@ -133,7 +133,8 @@ X-Session-Token: <SESSION_TOKEN>
 {
   "uuid": "f5ee33a7-…", "nickname": "에이",
   "email": "me@example.com", "emailVerified": false,
-  "accessFeatures": ["wheelchairAccessible"], "onboarded": true
+  "accessFeatures": ["wheelchairAccessible"], "onboarded": true,
+  "avatarUrl": "https://moduwa.app/images/reviews/ab12….jpg"
 }
 ```
 
@@ -150,6 +151,51 @@ X-Session-Token: <SESSION_TOKEN>
   온보딩을 마쳤다는 뜻이라 `onboarded` 는 `true` 가 되고, 그 뒤로 되돌아가지 않는다.
 - 키를 아예 보내지 않으면 **400 `nothing_to_update`** 입니다 — 빈 배열과 구분해야 합니다.
 - 값은 검증하지 않습니다(앱이 항목을 늘려도 서버 배포가 필요 없게). 개수 32개·항목 40자 상한만 겁니다.
+
+### PATCH /v1/auth/me — 프로필 편집  🔒
+
+**부분 갱신입니다.** 온 키만 바꾸고, 세 키가 모두 없을 때만 `400 nothing_to_update` 입니다.
+
+```jsonc
+{ "nickname": "대원" }                                    // 닉네임만
+{ "avatarUrl": "https://…/images/reviews/ab12.jpg" }      // 사진 설정
+{ "avatarUrl": null }                                     // 사진 제거
+{ "nickname": "대원", "accessFeatures": ["wheelchairAccessible"] }
+```
+
+| 필드 | 규칙 |
+|---|---|
+| `nickname` | 트림 후 1~40자. **빈 문자열은 400** — "지우기"가 아니라 잘못된 입력입니다(`authors.nickname` 은 not null) |
+| `avatarUrl` | `https://` 로 시작, ≤300자. **`null` = 제거, 키 없음 = 그대로** |
+| `accessFeatures` | 문자열 배열. 빈 배열은 "필요한 것 없음"이라는 유효한 값 |
+
+- 응답은 `AuthorView` 그대로 — 앱이 재조회 없이 화면을 갱신할 수 있습니다.
+- **`onboarded` 는 `accessFeatures` 가 실제로 온 경우에만 켜집니다.** 닉네임만 바꾼 것을
+  온보딩 완료로 해석하면 앱이 온보딩을 다시 띄울 기회를 잃습니다.
+- `http` URL 은 400 입니다 — iOS ATS 가 막아서 저장은 되고 화면에는 안 뜨는 조용한 실패가
+  되기 때문입니다.
+- 사진 업로드는 기존 `POST /v1/reviews/images` 를 그대로 쓰고, 반환된 URL 을 `avatarUrl` 로
+  보내면 됩니다(파일명이 내용의 sha256 이라 경로 접두사가 뜻을 갖지 않습니다).
+
+오류: `invalid_nickname` · `invalid_avatarUrl` · `invalid_accessFeatures` · `nothing_to_update`(전부 400)
+
+### 남이 보는 자리의 프로필 — `authorInfo`
+
+**기존 `author` 문자열은 그대로 둡니다**(iOS 라이브 사용). 프로필은 `authorInfo` 로 덧붙습니다.
+
+```jsonc
+// 후기 목록·상세, 후기 댓글
+"author": "대원",
+"authorInfo": { "nickname": "대원", "reviewCount": 3, "level": 7,
+                "avatarUrl": "https://…" }
+
+// 게시글 목록·상세, 게시글 댓글 (reviewCount·level 없음)
+"author": "대원",
+"authorInfo": { "nickname": "대원", "avatarUrl": "https://…" }
+```
+
+`avatarUrl` 이 `null` 이면 사진이 없는 것입니다 — 앱은 이니셜 원을 그립니다.
+`author_id` 가 없는 레거시 후기도 `null` 입니다.
 
 ### POST /v1/auth/email/verify/request — 인증 코드 재발송
 
