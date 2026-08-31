@@ -106,7 +106,9 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/posts/:postId/comments',
       '🔒 POST /v1/posts/:postId/comments  {body, authorNm?}',
       '🔒 PATCH · DELETE /v1/posts/:postId/comments/:commentId  (본인 것만)',
-      '🔒 POST /v1/reviews/:reviewId/report  {reason, detail?}',
+      '🔒 POST /v1/reports  {targetType, targetId, reason, detail?}'
+        + '  (targetType: post · post_comment · review · review_comment)',
+      '🔒 POST /v1/reviews/:reviewId/report  {reason, detail?}  (구 경로 — /v1/reports 와 같은 표에 쌓인다)',
       '🔒 POST /v1/devices  {token, platform?, environment, bundleId?}',
       '🔒 DELETE /v1/devices/:token',
       '',
@@ -2638,6 +2640,115 @@ export function buildApp(): Hono<AppEnv> {
   const REPORT_REASONS = new Set(['spam', 'abuse', 'falseInfo', 'privacyLeak', 'irrelevant', 'other'])
   const MAX_REPORT_DETAIL = 300
 
+  /**
+   * 신고할 수 있는 대상(047). 앱은 시트 한 벌을 대상만 바꿔 재사용한다(앱 팀).
+   *
+   * table 은 **이 맵의 고정 문자열만** 쿼리에 들어간다 — targetType 을 그대로 이어 붙이면
+   * SQL 주입이다. 맵에 없는 값은 400 으로 끊는다.
+   */
+  const REPORT_TARGETS = {
+    post: { table: 'posts', uuid: true, label: '게시글' },
+    post_comment: { table: 'post_comments', uuid: false, label: '댓글' },
+    review: { table: 'reviews', uuid: false, label: '후기' },
+    review_comment: { table: 'review_comments', uuid: false, label: '댓글' },
+  } as const
+
+  type ReportTargetType = keyof typeof REPORT_TARGETS
+
+  /**
+   * 신고를 기록한다. 라우트 셋(신규 /v1/reports · 기존 후기 신고)이 함께 쓴다.
+   *
+   * ⚠️ **자기 것을 신고하면 기록하지 않고 204 를 준다.** 오류가 아니다 — 앱이 오류창을 띄울
+   *    이유가 없고(앱 팀 요청), 자기 신고는 운영 신호가 아니라 잡음이다. 게다가 자기 글을
+   *    반복 신고해 "신고 많은 대상" 통계를 밀어 올리는 길을 막는다.
+   *
+   * 반환: 'ok' | 'not_found'
+   */
+  const recordReport = async (
+    targetType: ReportTargetType, targetId: string, reporterId: number,
+    reason: string, detail: string | null,
+  ): Promise<'ok' | 'not_found'> => {
+    const target = REPORT_TARGETS[targetType]
+    // 대상 테이블은 넷이라 FK 를 걸 수 없다(047) — 여기서 존재를 확인한다.
+    //  table 은 위 맵의 고정 문자열이다.
+    const found = (await query<{ author_id: number }>(
+      `select author_id from ${target.table} where id = $1`, [targetId])).rows[0]
+    if (!found) return 'not_found'
+    if (Number(found.author_id) === reporterId) return 'ok'   // 자기 것 — 조용히 무시
+
+    // 같은 사람의 재신고는 새 행이 아니라 갱신이다 — 멱등하게 204 를 준다(좋아요와 같은 판단).
+    await query(
+      `insert into reports (target_type, target_id, author_id, reason, detail)
+       values ($1, $2, $3, $4, $5)
+         on conflict (target_type, target_id, author_id)
+         do update set reason = excluded.reason, detail = excluded.detail, updated_at = now()`,
+      [targetType, targetId, reporterId, reason, detail],
+    )
+    return 'ok'
+  }
+
+  /** 신고 본문에서 사유·상세를 꺼낸다. 형식이 틀리면 Response 를 돌려준다. */
+  const readReportBody = async (c: Context): Promise<Response | { reason: string; detail: string | null }> => {
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    const p = (payload ?? {}) as Record<string, unknown>
+    const reason = typeof p.reason === 'string' ? p.reason.trim() : ''
+    // 화면에 없는 사유가 통계에 섞이면 운영이 판단할 수 없다 — 화이트리스트로 막는다.
+    if (!REPORT_REASONS.has(reason)) {
+      return c.json({ error: 'invalid_reason', message: '신고 사유가 올바르지 않습니다.' }, 400)
+    }
+    const detail = typeof p.detail === 'string' ? p.detail.trim().slice(0, MAX_REPORT_DETAIL) : ''
+    return { reason, detail: detail || null }
+  }
+
+  /**
+   * 신고 — 대상을 필드로 받는다(앱 팀 제안 A).
+   *
+   * 대상별로 라우트를 늘리지 않는다. 신고할 자리가 늘 때마다 라우트가 늘면, 앱은 시트 하나로
+   * 끝나는데 서버만 계속 커진다.
+   */
+  v1.post('/reports', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    const p = (payload ?? {}) as Record<string, unknown>
+    const targetType = typeof p.targetType === 'string' ? p.targetType.trim() : ''
+    if (!(targetType in REPORT_TARGETS)) {
+      return c.json({
+        error: 'invalid_target_type',
+        message: `targetType 은 ${Object.keys(REPORT_TARGETS).join(' · ')} 중 하나여야 합니다.`,
+      }, 400)
+    }
+    const kind = targetType as ReportTargetType
+
+    // ⚠️ 형식 검증을 여기서 한다. uuid 컬럼에 'abc' 를 넘기면 Postgres 가 캐스팅에 실패해
+    //    404 가 아니라 **500** 이 된다(게시글 라우트에서 겪은 것과 같은 함정).
+    const rawId = typeof p.targetId === 'string' ? p.targetId.trim() : ''
+    const targetId = REPORT_TARGETS[kind].uuid ? parsePostId(rawId) : parseCommentId(rawId)
+    if (targetId == null) {
+      return c.json({ error: 'not_found', message: '신고 대상을 찾을 수 없습니다.' }, 404)
+    }
+
+    const body = await readReportBody(c)
+    if (body instanceof Response) return body
+
+    const result = await recordReport(kind, targetId, gate.authorId, body.reason, body.detail)
+    if (result === 'not_found') {
+      return c.json({ error: 'not_found', message: '신고 대상을 찾을 수 없습니다.' }, 404)
+    }
+    return c.body(null, 204)
+  })
+
   v1.post('/reviews/:reviewId/report', async (c) => {
     const gate = requireAuth(c)
     if (gate instanceof Response) return gate
@@ -2651,24 +2762,15 @@ export function buildApp(): Hono<AppEnv> {
     } catch {
       return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
     }
-    const p = (payload ?? {}) as Record<string, unknown>
-    const reason = typeof p.reason === 'string' ? p.reason.trim() : ''
-    if (!REPORT_REASONS.has(reason)) {
-      return c.json({ error: 'invalid_reason', message: '신고 사유가 올바르지 않습니다.' }, 400)
+    const body = await readReportBody(c)
+    if (body instanceof Response) return body
+
+    // 앱이 이미 쓰고 있어 URL 은 남기지만, 기록은 reports 한 곳에 모은다(047).
+    //  두 표에 나뉘어 있으면 운영이 볼 곳이 둘이 된다.
+    const result = await recordReport('review', String(reviewId), gate.authorId, body.reason, body.detail)
+    if (result === 'not_found') {
+      return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404)
     }
-    const detail = typeof p.detail === 'string' ? p.detail.trim().slice(0, MAX_REPORT_DETAIL) : null
-
-    const exists = (await query('select 1 from reviews where id = $1', [reviewId])).rowCount
-    if (!exists) return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404)
-
-    // 같은 사람의 재신고는 새 행이 아니라 갱신이다 — 멱등하게 204 를 준다(좋아요와 같은 판단).
-    await query(
-      `insert into review_reports (review_id, author_id, reason, detail)
-       values ($1, $2, $3, $4)
-         on conflict (review_id, author_id)
-         do update set reason = excluded.reason, detail = excluded.detail, updated_at = now()`,
-      [reviewId, gate.authorId, reason, detail || null],
-    )
     return c.body(null, 204)
   })
 
