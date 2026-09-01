@@ -106,6 +106,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/posts/:postId/comments',
       '🔒 POST /v1/posts/:postId/comments  {body, authorNm?}',
       '🔒 PATCH · DELETE /v1/posts/:postId/comments/:commentId  (본인 것만)',
+      '🔒 GET · POST /v1/blocks  {uuid}  ·  DELETE /v1/blocks/:uuid  (사용자 차단)',
       '🔒 POST /v1/reports  {targetType, targetId, reason, detail?}'
         + '  (targetType: post · post_comment · review · review_comment)',
       '🔒 POST /v1/reviews/:reviewId/report  {reason, detail?}  (구 경로 — /v1/reports 와 같은 표에 쌓인다)',
@@ -722,6 +723,21 @@ export function buildApp(): Hono<AppEnv> {
   const levelFor = (reviewCount: number): number =>
     1 + LEVEL_THRESHOLDS.filter((t) => reviewCount >= t).length;
 
+  // ── 차단 필터(048) — 목록마다 끼운다. 라우트만 열고 목록을 그대로 두면
+  //  심사에서 "차단이 동작하지 않는다" 로 잡힌다.
+  /**
+   * "이 행의 작성자를 보는 사람이 차단했나" 를 묻는 조건. 목록 쿼리의 where 에 붙인다.
+   *
+   * 비로그인이면 viewer 파라미터가 null 이라 not exists 가 늘 참이 되어 아무것도 걸러지지
+   * 않는다 — 차단은 로그인한 사람의 설정이므로 그것이 맞다.
+   *
+   * @param authorCol 걸러낼 작성자 컬럼(예: 'p.author_id')
+   * @param viewerParam 보는 사람의 파라미터 번호
+   */
+  const blockFilter = (authorCol: string, viewerParam: number) =>
+    `not exists (select 1 from blocks b
+                  where b.blocker_id = $${viewerParam} and b.blocked_id = ${authorCol})`
+
   // 리뷰 목록/단건 공통 select.
   //  ⚠️ authors.device_id 는 사실상 신원 토큰이므로 절대 select 하지 않는다.
   //  author_review_count 는 작성자별 총 리뷰 수(레벨 파생용). author_id 가 없으면 0.
@@ -741,6 +757,7 @@ export function buildApp(): Hono<AppEnv> {
            to_char(r.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            a.nickname as author_nickname,
            a.avatar_url as author_avatar,
+           a.uuid as author_uuid,
            (select count(*)::int from reviews r2 where r2.author_id = r.author_id) as author_review_count,
            -- 후기 뱃지용 태그(019). 시안은 뱃지에 짧은 이름을 쓰지만 긴 이름도 함께 보내
            -- 클라이언트가 상황에 맞게 고르게 한다. 태그가 없으면 빈 배열.
@@ -764,12 +781,18 @@ export function buildApp(): Hono<AppEnv> {
   //  · author  : 레거시 문자열(닉네임). 제거하면 iOS ReviewDTO 디코딩이 깨진다.
   //  · authorInfo: {nickname, reviewCount, level} — 시안의 "닉네임 / Level N / N개의 리뷰"용.
   const shapeReview = (row: ReviewRow) => {
-    const { author_nickname: nickname, author_review_count: count, author_avatar: avatar, ...rest } = row;
+    const {
+      author_nickname: nickname, author_review_count: count, author_avatar: avatar,
+      author_uuid: uuid, ...rest
+    } = row;
     const reviewCount = count ?? 0;
     return {
       ...rest,
       authorInfo: {
         nickname: nickname ?? row.author, reviewCount, level: levelFor(reviewCount),
+        // 차단·신고가 가리킬 식별자(048). authors.id 는 넣지 않는다 — uuid 가 외부 노출용이다.
+        //  레거시 행(author_id 없음)은 null 이라 앱이 차단 메뉴를 감춰야 한다.
+        uuid: uuid ?? null,
         // 042. author_id 가 없는 레거시 행은 조인이 안 되어 null 이다 — 앱이 이니셜 원을 그린다.
         //  toHttps 로 감싸는 이유: 저장 시 https 만 받지만, 나중에 CDN 이 붙어 호스트가 바뀌어도
         //  같은 정규화를 타게 해 둔다(A14 의 교훈 — 섞인 스킴은 조용히 안 보인다).
@@ -793,22 +816,22 @@ export function buildApp(): Hono<AppEnv> {
     const sort = c.req.query('sort') ?? 'recommended';
     const order = REVIEW_ORDERS[sort] ?? REVIEW_ORDERS.recommended;
     const where: string[] = [];
-    // 필터 파라미터는 $1 부터(count 와 SELECT 가 공유). 보는 사람은 **맨 뒤**에 붙여
-    //  SELECT 에만 쓴다 — count 는 review_likes 를 보지 않아 viewer 가 필요 없다.
-    const filters: unknown[] = [];
+    // ⚠️ 보는 사람을 **$1 로 앞에 둔다.** 차단 필터가 생기면서 count 도 viewer 가 필요해졌다 —
+    //  예전처럼 SELECT 에만 주면 total 은 차단한 사람의 후기를 세고 items 는 빼서, 페이지마다
+    //  개수가 어긋나고 마지막 페이지가 비어 보인다.
+    const filters: unknown[] = [authorOf(c)];
+    const viewerParam = filters.length;
+    where.push(blockFilter('r.author_id', viewerParam));
     const contentId = c.req.query('contentId');
     if (contentId) { filters.push(contentId); where.push(`r.content_id = $${filters.length}`); }
     // 시안의 "사진/영상 후기만 보기". image_urls 가 null 인 행도 있어 coalesce 로 감싼다.
     if (c.req.query('hasImage') === 'true') where.push('coalesce(array_length(r.image_urls, 1), 0) > 0');
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
 
-    // count: 필터만.
     const total = (await query<{ n: number }>(
       `select count(*)::int n from reviews r ${wsql}`, filters)).rows[0]!.n;
-    // SELECT: 필터 + 맨 뒤 viewer.
-    const params = [...filters, authorOf(c)];
     const rows = (await query<ReviewRow>(
-      `${reviewSelect(params.length)} ${wsql} order by ${order} limit ${limit} offset ${offset}`, params,
+      `${reviewSelect(viewerParam)} ${wsql} order by ${order} limit ${limit} offset ${offset}`, filters,
     )).rows;
     return c.json({ total, limit, offset, sort, count: rows.length, items: rows.map(shapeReview) });
   });
@@ -832,11 +855,15 @@ export function buildApp(): Hono<AppEnv> {
   v1.get('/reviews/summary', async (c) => {
     const contentId = c.req.query('contentId')?.trim();
     if (!contentId) return c.json({ error: 'missing_contentId', message: 'contentId 는 필수입니다.' }, 400);
+    // 차단한 사람의 후기는 평균·개수에서도 뺀다 — 목록에서 사라진 후기가 개수에는 남아
+    //  "후기 3" 인데 두 개만 보이는 상태를 만들지 않는다.
+    const viewerId = authorOf(c);
     const row = (await query<{ review_count: number; rated_count: number; avg_rating: number | null }>(
       `select count(*)::int          as review_count,
               count(rating)::int     as rated_count,
               round(avg(rating)::numeric, 1)::float8 as avg_rating
-         from reviews where content_id = $1`, [contentId],
+         from reviews r where r.content_id = $1 and ${blockFilter('r.author_id', 2)}`,
+      [contentId, viewerId],
     )).rows[0]!;
     // 태그 집계 막대 — 시안의 "♿ 무장애 친화적이에요 … 21명".
     //  ⚠️ 시안 주석의 "20명 이상만 노출" 임계값은 적용하지 않는다(개발 단계에서 20명을
@@ -847,9 +874,9 @@ export function buildApp(): Hono<AppEnv> {
          from review_tags rt
          join reviews r        on r.id = rt.review_id
          join review_tag_defs d on d.code = rt.tag_code
-        where r.content_id = $1
+        where r.content_id = $1 and ${blockFilter('r.author_id', 2)}
         group by d.code, d.label, d.short_label, d.icon, d.sort_order
-        order by count desc, d.sort_order`, [contentId],
+        order by count desc, d.sort_order`, [contentId, viewerId],
     )).rows;
     return c.json({
       contentId,
@@ -1073,7 +1100,7 @@ export function buildApp(): Hono<AppEnv> {
     select c.id, c.body,
            coalesce(c.author_id = $VIEWER, false) as "isMine",
            to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
-           a.nickname as author, a.avatar_url as author_avatar,
+           a.nickname as author, a.avatar_url as author_avatar, a.uuid as author_uuid,
            (select count(*)::int from reviews r2 where r2.author_id = c.author_id) as author_review_count
       from review_comments c
       join authors a on a.id = c.author_id`;
@@ -1087,13 +1114,14 @@ export function buildApp(): Hono<AppEnv> {
   };
 
   const shapeComment = (row: CommentRow) => {
-    const { author_review_count: count, author_avatar: avatar, ...rest } = row;
+    const { author_review_count: count, author_avatar: avatar, author_uuid: uuid, ...rest } = row;
     const reviewCount = count ?? 0;
     return {
       ...rest,
       authorInfo: {
         nickname: row.author, reviewCount, level: levelFor(reviewCount),
         avatarUrl: toHttps(avatar),
+        uuid: (uuid as string | null) ?? null,
       },
     };
   };
@@ -1122,13 +1150,16 @@ export function buildApp(): Hono<AppEnv> {
     const exists = (await query<{ id: number }>('select id from reviews where id = $1', [reviewId])).rows[0];
     if (!exists) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
 
-    const total = (await query<{ n: number }>(
-      'select count(*)::int n from review_comments where review_id = $1', [reviewId],
-    )).rows[0]!.n;
     // 보는 사람 = 세션의 계정. 목록은 공개라 비로그인이면 null 이고 isMine 은 false 다.
     const viewerId = authorOf(c);
+    // total 도 같은 조건으로 센다 — 어긋나면 페이지 개수가 맞지 않는다.
+    const total = (await query<{ n: number }>(
+      `select count(*)::int n from review_comments c
+        where c.review_id = $1 and ${blockFilter('c.author_id', 2)}`, [reviewId, viewerId],
+    )).rows[0]!.n;
     const rows = (await query<CommentRow>(
-      `${commentSelect(2)} where c.review_id = $1 order by c.created_at, c.id limit ${limit} offset ${offset}`,
+      `${commentSelect(2)} where c.review_id = $1 and ${blockFilter('c.author_id', 2)}
+        order by c.created_at, c.id limit ${limit} offset ${offset}`,
       [reviewId, viewerId],
     )).rows;
     return c.json({ reviewId, total, limit, offset, count: rows.length, items: rows.map(shapeComment) });
@@ -1164,8 +1195,16 @@ export function buildApp(): Hono<AppEnv> {
       return c.json({ error: 'invalid_authorNm', message: `authorNm 은 ${MAX_NICKNAME_LEN}자 이하여야 합니다.` }, 400);
     }
 
-    const review = (await query<{ id: number }>('select id from reviews where id = $1', [reviewId])).rows[0];
+    const review = (await query<{ id: number; blocked: boolean }>(
+      `select r.id,
+              exists (select 1 from blocks b
+                       where b.blocker_id = r.author_id and b.blocked_id = $2) as blocked
+         from reviews r where r.id = $1`, [reviewId, gate.authorId])).rows[0];
     if (!review) return c.json({ error: 'not_found', message: '리뷰를 찾을 수 없습니다.' }, 404);
+    // 쓰기 차단 — 게시글 댓글과 같은 규칙이다(048).
+    if (review.blocked) {
+      return c.json({ error: 'blocked_by_author', message: '이 후기에는 댓글을 쓸 수 없습니다.' }, 403);
+    }
 
     // 리뷰 작성과 같은 규칙 — 처음 쓰는 기기는 닉네임이 필수다.
 
@@ -2182,7 +2221,7 @@ export function buildApp(): Hono<AppEnv> {
   const POST_SELECT = `
     select p.id, p.body, p.image_urls as "imageURLs",
            p.access_features as "accessFeatures",
-           a.nickname as author, a.avatar_url as author_avatar,
+           a.nickname as author, a.avatar_url as author_avatar, a.uuid as author_uuid,
            (select count(*)::int from post_likes pl where pl.post_id = p.id) as "likeCount",
            (select count(*)::int from post_comments pc where pc.post_id = p.id) as "commentCount",
            exists (
@@ -2215,11 +2254,16 @@ export function buildApp(): Hono<AppEnv> {
    *    공유할 수 있다. reviewCount·level 은 게시글 화면에 쓰이지 않아 넣지 않는다(앱 팀 확인).
    */
   const shapePost = (row: Record<string, unknown>) => {
-    const { author_avatar: avatar, ...rest } = row as { author_avatar?: string | null }
-      & Record<string, unknown>
+    const { author_avatar: avatar, author_uuid: uuid, ...rest } = row as {
+      author_avatar?: string | null; author_uuid?: string | null
+    } & Record<string, unknown>
     return {
       ...rest,
-      authorInfo: { nickname: rest.author as string, avatarUrl: toHttps(avatar ?? null) },
+      authorInfo: {
+        nickname: rest.author as string, avatarUrl: toHttps(avatar ?? null),
+        // 차단·신고가 가리킬 식별자(048). 닉네임으로 차단하면 동명이인이 함께 차단된다.
+        uuid: uuid ?? null,
+      },
     }
   }
 
@@ -2268,6 +2312,8 @@ export function buildApp(): Hono<AppEnv> {
 
     const conditions: string[] = []
     const params: unknown[] = [viewerId]
+    // 차단한 사람의 글은 홈·저장·장소별 어디에서도 보이지 않는다(048).
+    conditions.push(blockFilter('p.author_id', 1))
     // 내 것을 묻는 필터는 사람이 있어야 성립한다. 아직 아무것도 쓴 적 없는 기기라
     // authors 행이 없으면 결과는 빈 목록이 맞다 — 전체 목록을 주면 안 된다.
     if ((mine || liked) && viewerId == null) return c.json({ count: 0, limit, offset, items: [] })
@@ -2541,11 +2587,15 @@ export function buildApp(): Hono<AppEnv> {
   const notifyPostActor = async (
     postId: string, actorId: number, kind: 'like' | 'comment', commentBody?: string, commentId?: string,
   ) => {
-    const row = (await query<{ author_id: number; actor: string }>(
-      `select p.author_id, (select nickname from authors where id = $2) as actor
+    const row = (await query<{ author_id: number; actor: string; blocked: boolean }>(
+      `select p.author_id, (select nickname from authors where id = $2) as actor,
+              exists (select 1 from blocks b
+                       where b.blocker_id = p.author_id and b.blocked_id = $2) as blocked
          from posts p where p.id = $1`, [postId, actorId],
     )).rows[0]
     if (!row || Number(row.author_id) === actorId) return   // 없는 글 · 자기 행동
+    // 차단한 사람의 좋아요·댓글로는 알림이 가지 않는다(048) — 가리기만 하면 알림으로 존재가 샌다.
+    if (row.blocked) return
 
     if (kind === 'like') {
       await pushToAuthor(Number(row.author_id), {
@@ -2637,6 +2687,79 @@ export function buildApp(): Hono<AppEnv> {
   //     "남의 글을 지우는 도구" 가 된다. 앱도 신고 후 그 후기를 그대로 보여준다.
   //  사유는 앱이 쥔 고정 6종이다. 화이트리스트로 막는 이유는 화면에 없는 사유가 통계에 섞이면
   //  운영이 판단할 수 없기 때문이다(값 자유도를 주는 accessFeatures 와 반대 판단).
+  // ── 차단(048) ───────────────────────────────────────────────────────────────
+  //
+  //  심사 규칙 1.2: 사용자 생성 콘텐츠 앱은 신고·차단을 모두 갖춰야 한다.
+  //
+  //  ⚠️ **단방향 + 쓰기 차단이다.** ① 내가 차단한 사람의 글·후기·댓글이 내 목록에서 사라지고
+  //     알림도 오지 않는다. ② 그 사람은 내 글에 새 댓글을 달 수 없다(403). ①만 하면 차단해도
+  //     댓글은 계속 달리고 알림만 막힌 상태가 된다(앱 팀 결정).
+  //
+  //  ⚠️ **라우트만 열고 목록을 그대로 두면 심사에서 "차단이 동작하지 않는다" 로 잡힌다.**
+  //     아래 blockFilter 를 목록 쿼리마다 끼우는 것이 이 기능의 본체다.
+
+  /** uuid 로 계정을 찾는다. 없거나 탈퇴했으면 null. */
+  const authorByUuid = async (uuid: string): Promise<number | null> => {
+    if (!/^[0-9a-fA-F-]{36}$/.test(uuid)) return null
+    const row = (await query<{ id: number }>(
+      'select id from authors where uuid = $1 and deleted_at is null', [uuid])).rows[0]
+    return row ? Number(row.id) : null
+  }
+
+  //  차단 목록 — 설정의 "차단한 사용자" 화면. **해제할 길이 함께 있어야** 차단을 열 수 있다.
+  v1.get('/blocks', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const rows = (await query<{ uuid: string; nickname: string; avatar_url: string | null }>(
+      `select a.uuid, a.nickname, a.avatar_url
+         from blocks b join authors a on a.id = b.blocked_id
+        where b.blocker_id = $1 order by b.created_at desc`, [gate.authorId])).rows
+    return c.json({
+      count: rows.length,
+      items: rows.map((r) => ({ uuid: r.uuid, nickname: r.nickname, avatarUrl: toHttps(r.avatar_url) })),
+    })
+  })
+
+  v1.post('/blocks', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+
+    let payload: unknown
+    try {
+      payload = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid_json', message: 'JSON 본문을 파싱할 수 없습니다.' }, 400)
+    }
+    const uuid = typeof (payload as Record<string, unknown>)?.uuid === 'string'
+      ? ((payload as Record<string, unknown>).uuid as string).trim() : ''
+    const targetId = await authorByUuid(uuid)
+    if (targetId == null) {
+      return c.json({ error: 'not_found', message: '사용자를 찾을 수 없습니다.' }, 404)
+    }
+    // 자기 차단은 막는다 — 통과시키면 내 글이 내 목록에서 사라진다(제약도 걸려 있다, 048).
+    if (targetId === gate.authorId) {
+      return c.json({ error: 'invalid_target', message: '자신을 차단할 수 없습니다.' }, 400)
+    }
+    // 재차단은 새 행이 아니다 — 멱등하게 204(좋아요·신고와 같은 판단).
+    await query(
+      `insert into blocks (blocker_id, blocked_id) values ($1, $2) on conflict do nothing`,
+      [gate.authorId, targetId])
+    return c.body(null, 204)
+  })
+
+  //  해제 — 없는 것도 204 다(멱등). 이미 없는 것을 지우는 요청에 오류를 줄 이유가 없다.
+  v1.delete('/blocks/:uuid', async (c) => {
+    const gate = requireAuth(c)
+    if (gate instanceof Response) return gate
+    const targetId = await authorByUuid(c.req.param('uuid') ?? '')
+    // 없는 사람이면 지울 것도 없다 — 204 로 끝낸다(404 를 주면 앱이 오류창을 띄운다).
+    if (targetId != null) {
+      await query('delete from blocks where blocker_id = $1 and blocked_id = $2',
+        [gate.authorId, targetId])
+    }
+    return c.body(null, 204)
+  })
+
   const REPORT_REASONS = new Set(['spam', 'abuse', 'falseInfo', 'privacyLeak', 'irrelevant', 'other'])
   const MAX_REPORT_DETAIL = 300
 
@@ -2837,7 +2960,7 @@ export function buildApp(): Hono<AppEnv> {
 
   /// 게시글과 같은 규칙이다 — $VIEWER 는 보는 사람의 author_id(없으면 null).
   const POST_COMMENT_SELECT = `
-    select c.id, a.nickname as author, a.avatar_url as author_avatar, c.body,
+    select c.id, a.nickname as author, a.avatar_url as author_avatar, a.uuid as author_uuid, c.body,
            coalesce(c.author_id = $VIEWER, false) as "isMine",
            to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt"
       from post_comments c
@@ -2848,11 +2971,15 @@ export function buildApp(): Hono<AppEnv> {
 
   /** 게시글 댓글에 작성자 프로필을 덧붙인다(042). 내부 컬럼명이 새어 나가지 않게 감싼다. */
   const shapePostComment = (row: Record<string, unknown>) => {
-    const { author_avatar: avatar, ...rest } = row as { author_avatar?: string | null }
-      & Record<string, unknown>
+    const { author_avatar: avatar, author_uuid: uuid, ...rest } = row as {
+      author_avatar?: string | null; author_uuid?: string | null
+    } & Record<string, unknown>
     return {
       ...rest,
-      authorInfo: { nickname: rest.author as string, avatarUrl: toHttps(avatar ?? null) },
+      authorInfo: {
+        nickname: rest.author as string, avatarUrl: toHttps(avatar ?? null),
+        uuid: uuid ?? null,
+      },
     }
   }
 
@@ -2861,12 +2988,14 @@ export function buildApp(): Hono<AppEnv> {
     const { limit, offset } = paging(c)
     const postId = parsePostId(c.req.param('postId'))
     if (postId == null) return c.json(postNotFound, 404)
-    const total = (await query<{ n: number }>(
-      'select count(*)::int n from post_comments where post_id = $1', [postId])).rows[0]!.n
     // 보는 사람 = 세션의 계정. 목록 자체는 공개라 비로그인이면 null 이고 isMine 은 false 다.
     const viewerId = authorOf(c)
+    // total 도 같은 조건으로 센다 — 어긋나면 페이지 개수가 맞지 않는다.
+    const total = (await query<{ n: number }>(
+      `select count(*)::int n from post_comments c
+        where c.post_id = $1 and ${blockFilter('c.author_id', 2)}`, [postId, viewerId])).rows[0]!.n
     const rows = (await query(
-      `${postCommentSelect(2)} where c.post_id = $1
+      `${postCommentSelect(2)} where c.post_id = $1 and ${blockFilter('c.author_id', 2)}
         order by c.created_at limit ${limit} offset ${offset}`, [postId, viewerId],
     )).rows
     return c.json({
@@ -2899,8 +3028,19 @@ export function buildApp(): Hono<AppEnv> {
 
     const postId = parsePostId(c.req.param('postId'))
     if (postId == null) return c.json(postNotFound, 404)
-    const exists = (await query('select 1 from posts where id = $1', [postId])).rowCount
-    if (!exists) return c.json(postNotFound, 404)
+    const owner = (await query<{ author_id: number; blocked: boolean }>(
+      `select p.author_id,
+              exists (select 1 from blocks b
+                       where b.blocker_id = p.author_id and b.blocked_id = $2) as blocked
+         from posts p where p.id = $1`, [postId, gate.authorId])).rows[0]
+    if (!owner) return c.json(postNotFound, 404)
+    // ⚠️ **쓰기 차단**(048). 가리기만 하면 차단해도 댓글은 계속 달리고 알림만 막힌 상태가 된다.
+    //  404 가 아니라 403 이다 — 글은 실제로 존재하고 앱이 "차단되어 쓸 수 없다" 를 말해야 한다.
+    if (owner.blocked) {
+      return c.json({
+        error: 'blocked_by_author', message: '이 게시글에는 댓글을 쓸 수 없습니다.',
+      }, 403)
+    }
 
     const commentId = await withTransaction(async (client) => {
       // 작성자는 세션의 계정이다(030). 닉네임을 보냈으면 갱신한다.

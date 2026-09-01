@@ -10,7 +10,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { config } from '../config';
-import { query } from '../db';
+import { query, withTransaction } from '../db';
 import {
   type SignInResult,
   findEmailIdentity,
@@ -31,6 +31,7 @@ import {
   passwordPolicyError,
   verifyPassword,
 } from './password';
+import { exchangeCode as exchangeAppleCode, revoke as revokeApple } from './apple-auth';
 import { type AppEnv, clientIp } from './middleware';
 import {
   SocialNotConfiguredError,
@@ -54,6 +55,14 @@ const MAX_DEVICE_ID_LENGTH = 128; // app.ts 의 다른 쓰기 라우트와 같�
 // 무장애 항목 개수 상한. 앱이 항목을 늘려도 서버 배포 없이 따라가야 하므로 값은 검증하지
 //  않지만(030 주석), 개수는 막는다 — 검증하지 않는 배열에 상한이 없으면 그대로 저장소가 된다.
 const MAX_ACCESS_FEATURES = 32;
+
+/**
+ * 탈퇴한 계정의 표시 이름.
+ *
+ * ⚠️ 빈 문자열이나 null 이 아니다 — authors.nickname 과 reviews.author_nm 이 not null 이고,
+ *    앱도 이름 없는 작성자를 그리지 못한다. 남은 콘텐츠에 이 이름이 보인다.
+ */
+const DELETED_NICKNAME = '탈퇴한 사용자';
 
 /**
  * 로그인 실패 응답. **이유를 나누지 않는다.**
@@ -327,6 +336,9 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     //  여기로 함께 보낸다. 새 계정의 초기 닉네임으로만 쓰인다(signIn 주석 참고).
     //  (구글은 토큰의 name, 카카오는 nickname 에 이름이 들어 있어 이 값이 없어도 된다)
     const nickname = str(p.nickname);
+    // 애플만 쓰는 값. 계정 삭제 시 토큰 폐기에 필요한 refresh token 을 받아 두기 위한 것이다
+    //  (심사 규칙 — apple-auth.ts 상단). 앱이 안 보내도 로그인은 그대로 된다.
+    const authorizationCode = provider === 'apple' ? str(p.authorizationCode) : '';
     const accessFeatures = p.accessFeatures === undefined
       ? undefined
       : (Array.isArray(p.accessFeatures)
@@ -377,6 +389,21 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     //  주소를 바꿨으면 소셜 응답이 그것을 인증해 줄 근거가 없다).
     if (profile.email && profile.emailVerified) {
       await markEmailVerified(result.authorId, profile.email);
+    }
+
+    // 애플 refresh token 을 받아 둔다 — **계정 삭제 때만 쓴다.**
+    //  ⚠️ 실패해도 로그인을 막지 않는다. 토큰 검증은 이미 끝났고, 이 값이 없으면 나중에
+    //     폐기를 건너뛸 뿐이다. 로그인 경로에서 애플의 토큰 엔드포인트 장애를 사용자에게
+    //     전가하는 것이 더 나쁘다.
+    if (authorizationCode) {
+      const refresh = await exchangeAppleCode(authorizationCode);
+      if (refresh) {
+        await query(
+          `update author_identities set refresh_token = $3, updated_at = now()
+            where provider = 'apple' and subject = $1 and author_id = $2`,
+          [profile.subject, result.authorId, refresh],
+        );
+      }
     }
 
     const body = await finishSignIn(result, deviceId);
@@ -598,6 +625,97 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const view = await loadAuthorView(authorId);
     if (!view) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
     return c.json(view);
+  });
+
+  // ── 계정 삭제(048) ─────────────────────────────────────────────────────────
+  //
+  //  심사 규칙 5.1.1(v): 계정을 만들 수 있는 앱은 앱 안에서 계정 삭제도 제공해야 한다.
+  //
+  //  ⚠️ **작성자만 익명화한다 — 콘텐츠는 남긴다**(앱 팀·기획 결정, 048 주석). 함께 쓴 대화가
+  //     통째로 사라지면 지운 사람이 아니라 **남은 사람의** 화면이 깨진다.
+  //
+  //  ⚠️ **되돌릴 수 없다.** 휴지통을 두지 않는다 — 심사가 요구하는 것은 "지울 수 있는가" 이고,
+  //     되돌릴 수 있는 삭제는 그 요구를 충족하지 않는다.
+  auth.delete('/me', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401);
+
+    // 애플 폐기용 토큰을 **지우기 전에** 읽는다.
+    const appleToken = (await query<{ refresh_token: string | null }>(
+      `select refresh_token from author_identities
+        where author_id = $1 and provider = 'apple' and refresh_token is not null`,
+      [authorId],
+    )).rows[0]?.refresh_token ?? null;
+
+    // ⚠️ 폐기를 **DB 작업보다 먼저** 한다. 순서를 뒤집으면, 커밋 후 폐기가 실패했을 때 토큰이
+    //    이미 지워져 다시 시도할 방법이 없다 — 애플 설정에 우리 앱이 영구히 남는다.
+    //    반대로 폐기 성공 후 DB 가 실패하면 애플 연결만 끊긴 상태로, 다시 로그인하면 복구된다.
+    //    실패해도 삭제는 진행한다(apple-auth.ts 상단) — 폐기 실패로 탈퇴를 막는 것이 더 나쁘다.
+    if (appleToken) await revokeApple(appleToken);
+
+    await withTransaction(async (client) => {
+      // ① 공유 플랜의 소유권을 넘긴다 — 소유자가 사라지면 플랜이 고아가 된다.
+      //    **가장 먼저 합류한 편집자**에게 넘긴다(가장 오래 함께 쓴 사람이다).
+      const owned = (await client.query<{ id: string }>(
+        'select id from plans where author_id = $1', [authorId],
+      )).rows;
+      for (const plan of owned) {
+        const heir = (await client.query<{ author_id: number }>(
+          `select author_id from plan_members
+            where plan_id = $1 and author_id <> $2 order by joined_at, author_id limit 1`,
+          [plan.id, authorId],
+        )).rows[0];
+        if (heir) {
+          // ⚠️ 소유권은 plans.author_id 로만 표현된다 — plan_members 에는 **편집자만** 있고
+          //    role 은 'editor' 만 허용된다(040). 그래서 새 소유자를 멤버 목록에서 뺀다.
+          //    남겨 두면 멤버 목록(소유자 ∪ 멤버)에 같은 사람이 두 번 나온다.
+          await client.query('update plans set author_id = $2, version = version + 1 where id = $1',
+            [plan.id, heir.author_id]);
+          await client.query('delete from plan_members where plan_id = $1 and author_id = $2',
+            [plan.id, heir.author_id]);
+        } else {
+          // 남은 사람이 없으면 개인 데이터다 — 볼 사람이 없는 플랜을 남길 이유가 없다.
+          await client.query('delete from plans where id = $1', [plan.id]);
+        }
+      }
+
+      // ② 접근 수단을 끊는다. **신원을 지우는 것이 곧 로그인 차단이다** — 같은 소셜로 다시
+      //    로그인하면 (provider, subject) 를 찾지 못해 새 계정이 만들어진다(앱 팀 요청).
+      await client.query('delete from author_identities where author_id = $1', [authorId]);
+      await client.query('delete from author_sessions where author_id = $1', [authorId]);
+      await client.query('delete from author_devices where author_id = $1', [authorId]);
+      await client.query('delete from author_email_codes where author_id = $1', [authorId]);
+      // ⚠️ 기기 토큰을 지운다 — 남으면 탈퇴한 사람의 기기로 알림이 계속 간다(앱 팀 지적).
+      await client.query('delete from device_tokens where author_id = $1', [authorId]);
+
+      // ③ 개인 기록을 지운다. 남의 화면에 보이지 않는 값들이다.
+      await client.query('delete from saved_places where author_id = $1', [authorId]);
+      await client.query('delete from post_likes where author_id = $1', [authorId]);
+      await client.query('delete from review_likes where author_id = $1', [authorId]);
+      await client.query('delete from plan_members where author_id = $1', [authorId]);
+      await client.query('delete from push_sends where author_id = $1', [authorId]);
+      await client.query('delete from blocks where blocker_id = $1 or blocked_id = $1', [authorId]);
+
+      // ④ 좋아요를 지웠으니 후기의 카운터를 실제 값으로 맞춘다 — 안 하면 화면의 좋아요 수가
+      //    실제보다 많아진다(댓글 삭제에서 겪은 것과 같은 문제).
+      await client.query(
+        `update reviews r set like_count = (select count(*) from review_likes l where l.review_id = r.id)
+          where r.like_count <> (select count(*) from review_likes l where l.review_id = r.id)`);
+
+      // ⑤ 작성자를 익명화한다. 콘텐츠는 남고 사람만 지워진다.
+      await client.query(
+        `update authors
+            set nickname = $2, email = null, email_verified_at = null, avatar_url = null,
+                access_features = '{}', device_id = null, deleted_at = now()
+          where id = $1`,
+        [authorId, DELETED_NICKNAME]);
+      // ⚠️ reviews.author_nm 은 닉네임 사본이다(레거시 표시용). 여기도 바꾸지 않으면 후기
+      //    목록에 지운 사람의 닉네임이 그대로 남는다.
+      await client.query('update reviews set author_nm = $2 where author_id = $1',
+        [authorId, DELETED_NICKNAME]);
+    });
+
+    return c.body(null, 204);
   });
 
   return auth;

@@ -145,6 +145,21 @@ export const config = {
     likeDedupeHours: num('APNS_LIKE_DEDUPE_HOURS', 24),
   },
 
+  // ── Sign in with Apple 토큰 폐기 ──
+  //  ⚠️ **APNs 키와 다른 키다.** 같은 개발자 계정이지만 용도가 다른 별도 .p8 이다(용도:
+  //     Sign in with Apple). APNs 키로 서명하면 애플이 거부한다.
+  //  ⚠️ 애플 로그인을 제공하는 앱은 **계정 삭제 시 토큰 폐기를 호출해야 한다**(심사 규칙).
+  //     키가 없으면 삭제 자체는 진행하고 폐기만 건너뛴다 — 삭제를 막는 것이 더 나쁘다.
+  //  teamId 는 APNs 와 같은 팀이라 APNS_TEAM_ID 를 기본값으로 쓴다(둘을 따로 넣다가 어긋나는
+  //   실수를 줄인다).
+  appleAuth: {
+    keyP8Base64: process.env.APPLE_KEY_P8_BASE64?.trim() ?? '',
+    keyId: process.env.APPLE_KEY_ID?.trim() ?? '',
+    teamId: (process.env.APPLE_TEAM_ID || process.env.APNS_TEAM_ID)?.trim() ?? '',
+    // 폐기·코드교환 요청의 client_id. 네이티브 로그인은 앱 번들 ID 다.
+    clientId: (process.env.APPLE_CLIENT_ID || process.env.APNS_TOPIC)?.trim() ?? '',
+  },
+
   // ── 플랜 공동 편집 ──
   plans: {
     // 초대 코드 유효시간(분). 기획 확정값 30 — 링크가 단톡방에 남는 것 대비 짧게 가져가고,
