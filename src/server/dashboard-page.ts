@@ -49,6 +49,35 @@ section.on { display: block; }
 .card .v { font-size: 25px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .card .s { color: var(--muted); font-size: 12px; margin-top: 4px; }
 .card .s b { color: var(--accent); font-weight: 600; }
+/* ── 신고 운영(049) ── */
+.badge {
+  display: inline-block; min-width: 18px; margin-left: 6px; padding: 1px 6px;
+  border-radius: 9px; background: var(--bad); color: #fff; font-size: 11px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.badge:empty { display: none; }
+.rep { background: var(--panel); border: 1px solid var(--line); border-radius: 11px;
+       padding: 14px 16px; margin-bottom: 10px; }
+.rep.done { opacity: .62; }
+.rep .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.rep .cnt { font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+.rep .cnt.hot { color: var(--bad); }
+.rep .who { color: var(--muted); font-size: 12px; }
+.rep .spacer { flex: 1; }
+.tag { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+       font-size: 11px; color: var(--muted); background: var(--bg); white-space: nowrap; }
+.tag.reason { border-color: var(--warn); color: var(--warn); }
+.tag.gone { border-color: var(--bad); color: var(--bad); }
+.rep .body {
+  background: var(--code); border-radius: 8px; padding: 10px 12px; margin: 8px 0;
+  white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto;
+  font-size: 13px; line-height: 1.55;
+}
+.rep .body.none { color: var(--muted); font-style: italic; }
+.rep .note { color: var(--good); font-size: 12px; margin-top: 6px; }
+.rep .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.rep .acts input { flex: 1; min-width: 180px; padding: 6px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
 h2:first-child { margin-top: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
@@ -150,6 +179,7 @@ export function dashboardPage(): string {
   <div class="tabs">
     <button class="tab on" data-tab="overview">개요</button>
     <button class="tab" data-tab="tables">테이블</button>
+    <button class="tab" data-tab="reports">신고<span class="badge" id="rbadge"></span></button>
     <button class="tab" data-tab="sql">SQL</button>
   </div>
   <button class="act" id="refresh">새로고침</button>
@@ -165,6 +195,32 @@ export function dashboardPage(): string {
       <span class="hint" id="tinfo"></span>
     </div>
     <div class="panel scroll" id="tbody"></div>
+  </section>
+  <section id="reports">
+    <div class="row">
+      <select id="ropen">
+        <option value="open">볼 것만 (미처리)</option>
+        <option value="all">전체</option>
+      </select>
+      <select id="rtype">
+        <option value="">모든 대상</option>
+        <option value="post">게시글</option>
+        <option value="post_comment">게시글 댓글</option>
+        <option value="review">후기</option>
+        <option value="review_comment">후기 댓글</option>
+      </select>
+      <select id="rreason">
+        <option value="">모든 사유</option>
+        <option value="spam">spam</option>
+        <option value="abuse">abuse</option>
+        <option value="falseInfo">falseInfo</option>
+        <option value="privacyLeak">privacyLeak</option>
+        <option value="irrelevant">irrelevant</option>
+        <option value="other">other</option>
+      </select>
+      <span class="hint" id="rinfo"></span>
+    </div>
+    <div id="rlist"><div class="loading">불러오는 중…</div></div>
   </section>
   <section id="sql">
     <textarea id="q" spellcheck="false" placeholder="select ... 또는 with ... — 읽기 전용, 한 문장만"></textarea>
@@ -229,11 +285,123 @@ var api = function (path, opts) {
 var tabs = document.querySelectorAll('.tab');
 for (var i = 0; i < tabs.length; i++) {
   tabs[i].addEventListener('click', function (e) {
-    var name = e.target.getAttribute('data-tab');
-    document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('on', t === e.target); });
+    // ⚠️ e.target 이 아니라 closest 다 — 탭 안에 배지(span)가 있어서, 배지를 누르면
+    //    e.target 이 span 이 되어 data-tab 이 null 이 되고 탭이 열리지 않는다.
+    var btn = e.target.closest('.tab');
+    if (!btn) return;
+    var name = btn.getAttribute('data-tab');
+    document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('on', t === btn); });
     document.querySelectorAll('section').forEach(function (s) { s.classList.toggle('on', s.id === name); });
     if (name === 'tables' && !window.__tablesReady) loadTableList();
+    if (name === 'reports') loadReports();
   });
+}
+
+// ── 신고 운영(049) ──
+//  이 화면의 핵심은 "무엇이 신고됐는지" 를 그 자리에서 보여주는 것이다. 서버가 본문·작성자를
+//  조인해 주므로 여기서는 그리기만 한다.
+var TYPE_LABEL = {
+  post: '게시글', post_comment: '게시글 댓글', review: '후기', review_comment: '후기 댓글'
+};
+
+function loadReports() {
+  var open = document.getElementById('ropen').value;
+  var type = document.getElementById('rtype').value;
+  var reason = document.getElementById('rreason').value;
+  var q = '/reports?open=' + encodeURIComponent(open)
+        + (type ? '&targetType=' + encodeURIComponent(type) : '')
+        + (reason ? '&reason=' + encodeURIComponent(reason) : '');
+  document.getElementById('rlist').innerHTML = '<div class="loading">불러오는 중…</div>';
+  api(q).then(renderReports).catch(function (e) {
+    document.getElementById('rlist').innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  });
+}
+
+function renderReports(d) {
+  var badge = document.getElementById('rbadge');
+  badge.textContent = d.counts.open > 0 ? String(d.counts.open) : '';
+  var byReason = d.counts.byReason.map(function (r) { return r.reason + ' ' + r.n; }).join(' · ');
+  document.getElementById('rinfo').textContent =
+    '미처리 ' + fmt(d.counts.open) + ' / 전체 ' + fmt(d.counts.total)
+    + (byReason ? ' — ' + byReason : '');
+
+  if (!d.groups.length) {
+    document.getElementById('rlist').innerHTML =
+      '<div class="panel" style="padding:22px;text-align:center;color:var(--muted)">신고가 없습니다.</div>';
+    return;
+  }
+  var h = '';
+  for (var i = 0; i < d.groups.length; i++) {
+    var g = d.groups[i];
+    var done = g.openCount === 0;
+    h += '<div class="rep' + (done ? ' done' : '') + '">';
+    h += '<div class="top">';
+    h += '<span class="cnt' + (g.reports >= 3 ? ' hot' : '') + '">신고 ' + g.reports + '</span>';
+    h += '<span class="tag">' + esc(TYPE_LABEL[g.targetType] || g.targetType) + '</span>';
+    for (var j = 0; j < g.reasons.length; j++) {
+      h += '<span class="tag reason">' + esc(g.reasons[j]) + '</span>';
+    }
+    if (g.targetGone) h += '<span class="tag gone">이미 삭제됨</span>';
+    if (g.authorDeleted) h += '<span class="tag gone">탈퇴한 작성자</span>';
+    h += '<span class="spacer"></span>';
+    h += '<span class="who">' + ago(g.lastAt) + '</span>';
+    h += '</div>';
+
+    h += '<div class="who">작성자 ' + esc(g.authorNickname || '(알 수 없음)')
+       + (g.authorUuid ? ' · <code>' + esc(g.authorUuid.slice(0, 8)) + '</code>' : '')
+       + ' · 신고자 ' + esc(g.reporters.join(', ')) + '</div>';
+
+    if (g.body) {
+      h += '<div class="body">' + esc(g.body) + '</div>';
+    } else {
+      h += '<div class="body none">대상이 지워져 내용을 볼 수 없습니다. (' + esc(g.targetId) + ')</div>';
+    }
+    for (var k = 0; k < g.notes.length; k++) {
+      h += '<div class="note">✓ ' + esc(g.notes[k]) + '</div>';
+    }
+
+    var key = esc(g.targetType) + '|' + esc(g.targetId);
+    h += '<div class="acts" data-key="' + key + '">';
+    if (done) {
+      h += '<button class="act" data-do="reopen">다시 볼 것으로</button>';
+    } else {
+      h += '<input placeholder="판단 내용 (예: 조치함 / 문제 없음)" data-note>';
+      h += '<button class="act" data-do="ok">문제 없음</button>';
+      h += '<button class="act" data-do="acted">조치함</button>';
+    }
+    h += '</div></div>';
+  }
+  document.getElementById('rlist').innerHTML = h;
+}
+
+// 버튼은 위임으로 받는다 — 목록을 다시 그릴 때마다 리스너를 붙이지 않게.
+document.getElementById('rlist').addEventListener('click', function (e) {
+  var btn = e.target.closest('button[data-do]');
+  if (!btn) return;
+  var acts = btn.parentNode;
+  var parts = acts.getAttribute('data-key').split('|');
+  var input = acts.querySelector('[data-note]');
+  var typed = input ? input.value.trim() : '';
+  var note = btn.getAttribute('data-do') === 'reopen' ? ''
+    : (typed || (btn.getAttribute('data-do') === 'ok' ? '문제 없음' : '조치함'));
+  btn.disabled = true;
+  api('/reports/resolve', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ targetType: parts[0], targetId: parts[1], note: note })
+  }).then(loadReports).catch(function (err) { btn.disabled = false; alert(err.message); });
+});
+
+// 첫 진입에서 탭 배지에 미처리 수가 바로 보이게 한 번 읽는다 — 신고 탭을 열어야만
+//  알 수 있다면 운영이 신고를 놓친다.
+api('/reports?open=open&limit=1').then(function (d) {
+  var b = document.getElementById('rbadge');
+  b.textContent = d.counts.open > 0 ? String(d.counts.open) : '';
+}).catch(function () {});
+
+var rfilters = ['ropen', 'rtype', 'rreason'];
+for (var ri = 0; ri < rfilters.length; ri++) {
+  document.getElementById(rfilters[ri]).addEventListener('change', loadReports);
 }
 
 // ── 개요 ──
@@ -315,6 +483,7 @@ document.getElementById('refresh').addEventListener('click', function () {
   var on = document.querySelector('section.on').id;
   if (on === 'overview') loadOverview();
   else if (on === 'tables') loadTable();
+  else if (on === 'reports') loadReports();
 });
 
 // ── 테이블 브라우저 ──

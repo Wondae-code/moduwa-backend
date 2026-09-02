@@ -8,7 +8,9 @@ import {
   checkPassword, clearFailedLogins, clearSessionCookie, isLoggedIn, issueToken,
   loginAttemptsLeft, recordFailedLogin, requireLogin, setSessionCookie,
 } from './dashboard-auth';
-import { browse, listTables, overview, runConsoleQuery } from './dashboard-data';
+import {
+  browse, listTables, overview, reportCounts, reportGroups, resolveReports, runConsoleQuery,
+} from './dashboard-data';
 import { dashboardPage, loginPage } from './dashboard-page';
 
 export function buildDashboard(): Hono {
@@ -64,6 +66,30 @@ export function buildDashboard(): Hono {
     } catch (err) {
       return c.json({ error: 'bad_request', message: (err as Error).message }, 400);
     }
+  });
+
+  // ── 신고 운영(049) ──
+  dash.get('/api/reports', async (c) => {
+    const open = c.req.query('open') !== 'all';   // 기본은 "볼 것만"
+    const targetType = c.req.query('targetType')?.trim() || undefined;
+    const reason = c.req.query('reason')?.trim() || undefined;
+    const [counts, groups] = await Promise.all([
+      reportCounts(),
+      reportGroups({ open, targetType, reason, limit: 200 }),
+    ]);
+    return c.json({ counts, groups });
+  });
+
+  //  ⚠️ 대시보드에서 **유일하게 쓰기를 하는 라우트**다. 그래도 콘텐츠를 건드리지는 않는다 —
+  //     남기는 것은 판단의 기록뿐이고, 신고가 대상을 감추지 않는다는 원칙은 그대로다.
+  dash.post('/api/reports/resolve', async (c) => {
+    type ResolveBody = { targetType?: string; targetId?: string; note?: string };
+    const b: ResolveBody = await c.req.json<ResolveBody>().catch(() => ({} as ResolveBody));
+    if (!b.targetType || !b.targetId) {
+      return c.json({ error: 'bad_request', message: 'targetType 과 targetId 가 필요합니다.' }, 400);
+    }
+    const updated = await resolveReports(b.targetType, b.targetId, b.note ?? '');
+    return c.json({ updated });
   });
 
   dash.post('/api/query', async (c) => {

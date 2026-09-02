@@ -330,3 +330,138 @@ export async function runConsoleQuery(input: string): Promise<QueryResult> {
     truncated,
   };
 }
+
+// ── 신고 운영(049) ───────────────────────────────────────────────────────────
+//
+//  ⚠️ **이 화면의 핵심은 "무엇이 신고됐는지 그 자리에서 보이는 것"이다.** reports 에는
+//     target_id 만 있어서, 조인하지 않으면 운영이 신고를 볼 때마다 SQL 을 쳐야 한다.
+//     그러면 화면이 있으나 마나다.
+//
+//  ⚠️ **대상 단위로 묶는다.** 신고는 사람이 아니라 대상에 쌓인다 — "3명이 신고한 글" 이
+//     "1명이 신고한 글" 셋보다 먼저 보여야 판단 순서가 맞다.
+
+export type ReportGroup = {
+  targetType: string;
+  targetId: string;
+  reports: number;            // 이 대상에 쌓인 신고 수
+  reasons: string[];          // 사유(많은 순)
+  reporters: string[];        // 신고자 닉네임
+  lastAt: string;
+  openCount: number;          // 아직 판단하지 않은 신고 수
+  body: string | null;        // 신고당한 내용
+  authorNickname: string | null;
+  authorUuid: string | null;
+  authorDeleted: boolean;
+  targetGone: boolean;        // 대상이 이미 지워졌다
+  notes: string[];            // 남긴 판단 기록
+};
+
+/**
+ * 신고 목록. 대상별로 묶고 신고당한 본문·작성자를 함께 읽는다.
+ *
+ * 대상 테이블이 넷이라 FK 로 묶을 수 없어(047) union 으로 본문을 모은다. 대상이 지워진
+ * 신고는 본문이 null 이고 targetGone 이 참이다 — "신고된 뒤 지워졌다"도 운영에 필요한 사실이다.
+ */
+export async function reportGroups(
+  opts: { open?: boolean; targetType?: string; reason?: string; limit?: number } = {},
+): Promise<ReportGroup[]> {
+  const limit = Math.min(200, Math.max(1, opts.limit ?? 100));
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (opts.open) where.push('r.resolved_at is null');
+  if (opts.targetType) { params.push(opts.targetType); where.push(`r.target_type = $${params.length}`); }
+  if (opts.reason) { params.push(opts.reason); where.push(`r.reason = $${params.length}`); }
+  const wsql = where.length ? `where ${where.join(' and ')}` : '';
+
+  // 네 대상의 본문·작성자를 한 모양으로 모은다. id 를 text 로 맞춘다(reports.target_id 가 text).
+  const targets = `
+    select 'post'::text tt, p.id::text ti, p.body, p.author_id from posts p
+     union all
+    select 'post_comment', c.id::text, c.body, c.author_id from post_comments c
+     union all
+    select 'review', rv.id::text, rv.body, rv.author_id from reviews rv
+     union all
+    select 'review_comment', rc.id::text, rc.body, rc.author_id from review_comments rc`;
+
+  return (await readOnlyQuery<{
+    target_type: string; target_id: string; reports: number; reasons: string[];
+    reporters: string[]; last_at: string; open_count: number; body: string | null;
+    author_nickname: string | null; author_uuid: string | null; author_deleted: boolean;
+    target_gone: boolean; notes: string[];
+  }>(
+    `with grouped as (
+       select r.target_type, r.target_id,
+              count(*)::int                                      as reports,
+              count(*) filter (where r.resolved_at is null)::int  as open_count,
+              array_agg(distinct r.reason)                        as reasons,
+              array_agg(distinct coalesce(ra.nickname, '(알 수 없음)')) as reporters,
+              array_remove(array_agg(distinct r.resolved_note), null)  as notes,
+              max(r.created_at)                                   as last_at
+         from reports r
+         left join authors ra on ra.id = r.author_id
+         ${wsql}
+        group by r.target_type, r.target_id
+     )
+     select g.target_type, g.target_id, g.reports, g.open_count, g.reasons, g.reporters, g.notes,
+            to_char(g.last_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_at,
+            t.body,
+            a.nickname as author_nickname,
+            a.uuid::text as author_uuid,
+            (a.deleted_at is not null) as author_deleted,
+            (t.ti is null) as target_gone
+       from grouped g
+       left join (${targets}) t on t.tt = g.target_type and t.ti = g.target_id
+       left join authors a on a.id = t.author_id
+      -- 미처리가 많은 것부터. 같으면 최근 것부터.
+      order by g.open_count desc, g.last_at desc
+      limit ${limit}`,
+    params,
+  )).rows.map((r) => ({
+    targetType: r.target_type,
+    targetId: r.target_id,
+    reports: r.reports,
+    reasons: r.reasons ?? [],
+    reporters: r.reporters ?? [],
+    lastAt: r.last_at,
+    openCount: r.open_count,
+    body: r.body,
+    authorNickname: r.author_nickname,
+    authorUuid: r.author_uuid,
+    authorDeleted: Boolean(r.author_deleted),
+    targetGone: Boolean(r.target_gone),
+    notes: r.notes ?? [],
+  }));
+}
+
+export type ReportCounts = { open: number; total: number; byReason: { reason: string; n: number }[] };
+
+export async function reportCounts(): Promise<ReportCounts> {
+  const head = (await readOnlyQuery<{ open: number; total: number }>(
+    `select count(*) filter (where resolved_at is null)::int as open,
+            count(*)::int as total from reports`)).rows[0] ?? { open: 0, total: 0 };
+  const byReason = (await readOnlyQuery<{ reason: string; n: number }>(
+    `select reason, count(*)::int n from reports where resolved_at is null
+      group by reason order by n desc`)).rows;
+  return { open: head.open, total: head.total, byReason };
+}
+
+/**
+ * 한 대상의 신고를 판단 완료로 표시한다. 되돌리려면 note 를 비워 보낸다.
+ *
+ * ⚠️ **readOnlyQuery 를 쓰지 않는다** — 그 함수는 READ ONLY 트랜잭션이라 UPDATE 가 에러다.
+ *    대시보드에서 유일하게 쓰는 경로이므로 여기만 pool 을 직접 쓴다.
+ */
+export async function resolveReports(
+  targetType: string, targetId: string, note: string,
+): Promise<number> {
+  const trimmed = note.trim().slice(0, 200);
+  const res = trimmed
+    ? await pool.query(
+        `update reports set resolved_at = now(), resolved_note = $3
+          where target_type = $1 and target_id = $2`, [targetType, targetId, trimmed])
+    // 빈 note = 판단 취소. 다시 "볼 것" 으로 돌아온다.
+    : await pool.query(
+        `update reports set resolved_at = null, resolved_note = null
+          where target_type = $1 and target_id = $2`, [targetType, targetId]);
+  return res.rowCount ?? 0;
+}
