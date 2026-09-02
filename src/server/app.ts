@@ -8,6 +8,7 @@ import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
+import { privacyPage, termsPage } from './legal-pages';
 import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
 import { buildDashboard } from './dashboard';
@@ -115,6 +116,8 @@ export function buildApp(): Hono<AppEnv> {
       '',
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
+      'GET /privacy · /terms  (개인정보 처리방침 · 이용약관 — 인증 불필요)',
+      '',
       '🔒 = X-Session-Token 필요. POST /v1/auth/email/sign-up · sign-in 으로 발급.',
       ...(config.dashboard.password ? ['GET /dashboard  (수집 현황 대시보드 — 비밀번호 로그인)'] : []),
     ],
@@ -219,6 +222,11 @@ export function buildApp(): Hono<AppEnv> {
         font-weight:600;padding:10px 24px;border-radius:10px}
 </style></head><body><div class="card"><div class="logo">모두와</div>${body}</div></body></html>`);
   });
+
+  // 개인정보 처리방침 · 이용약관 — **인증 없이** 연다.
+  //  앱스토어가 로그인 없이 접근되는 공개 URL 을 요구한다(legal-pages.ts 상단).
+  app.get('/privacy', (c) => c.html(privacyPage()));
+  app.get('/terms', (c) => c.html(termsPage()));
 
   app.get('/health', async (c) => {
     try {
