@@ -5,14 +5,44 @@ data.go.kr 마이페이지(활용신청 현황)에서 직접 탐색으로 수집
 
 | # | API | 기관 | 엔드포인트 | 비고 |
 |---|---|---|---|---|
-| 1 | 식품_관광식당 조회서비스 | 행안부 | `https://apis.data.go.kr/1741000/tourist_restaurants` | 일 10,000 |
+| 1 | 식품_관광식당 조회서비스 ✅수집중 | 행안부 | `https://apis.data.go.kr/1741000/tourist_restaurants` | 일 10,000 · `ingest:restaurants` |
 | 2 | 지역별 관광 다양성 | KTO | `https://apis.data.go.kr/B551011/AreaTarDivService` | 통계 |
 | 3 | 관광지별 연관 관광지 정보 ✅수집중 | KTO | `https://apis.data.go.kr/B551011/TarRlteTarService1` | 구현됨 |
 | 4 | 기초지자체 중심 관광지 정보 | KTO | `https://apis.data.go.kr/B551011/LocgoHubTarService1` | 시군구 기반 |
 | 5 | 국문 관광정보 서비스 (KorService2) | KTO | `https://apis.data.go.kr/B551011/KorService2` | **전국 POI 종합** |
 | 6 | 빅데이터_지역별 방문자수 | KTO | `https://apis.data.go.kr/B551011/DataLabService` | 시계열 |
 | 7 | 무장애 여행 정보 (KorWithService2) | KTO | `https://apis.data.go.kr/B551011/KorWithService2` | KorService2 동일구조 |
-| 8 | 관광지 집중률 방문자 추이 예측 | KTO | `https://apis.data.go.kr/B551011/TatsCnctrRateService` | 향후 30일 예측 |
+| 8 | 관광지 집중률 방문자 추이 예측 ✅수집중 | KTO | `https://apis.data.go.kr/B551011/TatsCnctrRateService` | 향후 30일 예측 |
+| 9 | 반려동물 동반여행 (KorPetTourService2) ✅수집중 | KTO | `https://apis.data.go.kr/B551011/KorPetTourService2` | `ingest:pet`·`ingest:pet-detail` |
+
+## 활용 현황 (2026-09-04 실측)
+
+| # | API | 수집 스크립트 | 적재 |
+|---|---|---|---|
+| 1 | 식품_관광식당 | `ingest:restaurants` | 사업장 **218**곳(영업중 142) |
+| 2 | AreaTarDivService | `ingest:areadiv` | **0건** — 아래 ⚠️ 참고 |
+| 3 | TarRlteTarService1 | `ingest` | 3,570,406행 |
+| 4 | LocgoHubTarService1 | `ingest:locgo`·`ingest:locgo-detail` | 555,967 + 54,478행 |
+| 5 | KorService2 | `ingest:kor`·`ingest:kordetail` | 61,627 + 39,068행 |
+| 6 | DataLabService | `ingest:datalab` | 1,309행(슬림 집계) |
+| 7 | KorWithService2 | `ingest:korwith`·`ingest:withdetail` | 10,273행 |
+| 8 | TatsCnctrRateService | `ingest:tats` | 832,842행 |
+| 9 | KorPetTourService2 | `ingest:pet`·`ingest:pet-detail` | 9,767 + 9,767행 |
+
+> ⚠️ **AreaTarDivService 는 제공기관이 데이터를 넣지 않았다.** 세 오퍼레이션 × 시도 4곳 ×
+> 5개월 = 60개 조합을 재확인(2026-09-04)했고 **전부 `resultCode 0000`(정상)에 `totalCount 0`**
+> 이었다. 인증·파라미터 문제라면 에러 코드가 온다. 수집 코드(`ingest:areadiv`)는 완성돼 있고
+> 프로브 가드가 있어 개방되면 자동으로 수집된다.
+
+> ⚠️ **식품_관광식당은 다른 API 와 두 가지가 다르다.**
+> ① `_type=json` 이 아니라 **`type=json`** 을 받는다(행안부 규약).
+> ② 응답이 사업장이 아니라 **갱신 이력**이다 — 526 레코드가 사업장 218곳이다(`MNG_NO` 중복,
+> `DAT_UPDT_SE` I/U). 사업장별 최신 레코드만 골라야 하며, 행 수를 업소 수로 세면 두 배 넘게
+> 부풀려진다.
+> ③ **원본 좌표(`CRD_INFO_X/Y`)를 쓸 수 없다.** 투영좌표계인데 원점이 어느 표준 정의와도
+> 맞지 않는다 — 카카오 지오코딩 40건과 대조해 ΔX 중앙 −72m / ΔY 중앙 −309m(표준편차 31/16m)
+> 의 일정한 오프셋이 나왔다. 그래서 주소를 카카오로 지오코딩해 WGS84 를 얻는다(영업중 142곳
+> 중 **141곳 성공**, 실패 1곳은 카카오에 없는 옛 지번).
 
 ## 오퍼레이션
 
