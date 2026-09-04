@@ -11,6 +11,8 @@ export type AppEnv = {
   Variables: {
     /** apiKeyAuth 가 넣는다. 레이트리밋 버킷 키로 쓰인다. */
     apiKey: string;
+    /** 'full' = 앱이 쓰는 키 · 'audit' = 공공 데이터 전용 키(AUDIT_ALLOWED 만 통과). */
+    apiKeyScope: 'full' | 'audit';
     /** sessionAuth 가 넣는다. 로그인한 요청에만 있다. */
     authorId: number;
     /** sessionAuth 가 넣는다. 로그아웃에서 이 세션만 끊는 데 쓴다. */
@@ -26,18 +28,49 @@ export type AppEnv = {
  */
 export async function apiKeyAuth(c: Context<AppEnv>, next: Next): Promise<Response | void> {
   const keys = config.api.keys;
-  if (keys.length === 0) return next(); // 로컬 개발: 키 미설정 시 통과
+  const auditKeys = config.api.auditKeys;
+  if (keys.length === 0 && auditKeys.length === 0) return next(); // 로컬 개발: 키 미설정 시 통과
 
   const auth = c.req.header('authorization');
   const bearer = auth?.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
   const provided = bearer || c.req.header('x-api-key')?.trim() || '';
 
-  if (!provided || !keys.includes(provided)) {
+  const isFull = provided !== '' && keys.includes(provided);
+  const isAudit = provided !== '' && auditKeys.includes(provided);
+  if (!isFull && !isAudit) {
     return c.json({ error: 'unauthorized', message: '유효한 API 키가 필요합니다 (Authorization: Bearer <key>).' }, 401);
   }
+
+  // 감사용 키는 **허용 목록에 있는 경로만** 통과한다.
+  //
+  //  ⚠️ 차단 목록이 아니라 허용 목록이다(fail-closed). 새 라우트가 생겼을 때 차단 목록은
+  //     손대는 것을 잊으면 조용히 열리지만, 허용 목록은 잊으면 닫힌다 — 개인정보가 새는
+  //     방향보다 감사자가 404 를 보고 문의하는 방향이 낫다.
+  if (isAudit && !isFull && !AUDIT_ALLOWED.some((re) => re.test(c.req.path))) {
+    return c.json({
+      error: 'forbidden',
+      message: '이 키는 공공 관광 데이터 조회 전용입니다.',
+    }, 403);
+  }
   c.set('apiKey', provided);
+  c.set('apiKeyScope', isFull ? 'full' : 'audit');
   return next();
 }
+
+/**
+ * 감사용 키가 접근할 수 있는 경로.
+ *
+ * 이용자 데이터가 실리지 않는 것만 넣는다 — 실측으로 확인했다(닉네임·authorInfo·uuid 없음).
+ * ⚠️ /v1/reviews·/v1/posts 는 **넣지 않는다.** 후기 본문에 이용자가 적은 장애 정보가 있고
+ *    authorInfo.uuid 로 한 사람의 글을 전부 엮을 수 있다.
+ */
+const AUDIT_ALLOWED: readonly RegExp[] = [
+  /^\/health$/,
+  /^\/v1\/pet-friendly(\/.*)?$/,
+  /^\/v1\/attractions(\/.*)?$/,
+  /^\/v1\/barrier-free(\/.*)?$/,
+  /^\/v1\/search$/,
+];
 
 /**
  * 요청자의 IP. X-Forwarded-For 의 **오른쪽에서** 신뢰 홉 수만큼 세어 얻는다.
