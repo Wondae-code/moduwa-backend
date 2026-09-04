@@ -60,15 +60,6 @@ export const config = {
     port: num('PORT', 8080),
     // 허용할 API 키 목록(콤마 구분). 비면 인증 비활성(로컬 개발용) — 배포 시 반드시 설정.
     keys: (process.env.API_KEYS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
-    /**
-     * 감사용 키 — **공공 관광 데이터만** 읽을 수 있다.
-     *
-     * ⚠️ 일반 키(API_KEYS)를 외부에 주면 안 된다. 그 키로는 /v1/reviews·/v1/posts 가 열리고,
-     *    거기에는 닉네임·후기 본문·authorInfo.uuid 가 실린다 — 후기 본문에는 이용자가 직접
-     *    적은 장애 정보(민감정보)가 들어 있고, uuid 로는 한 사람의 글을 전부 엮을 수 있다.
-     *    개인정보 처리방침에 "제3자에게 제공하지 않는다" 고 적은 것과도 어긋난다.
-     */
-    auditKeys: (process.env.AUDIT_API_KEYS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     // CORS 허용 오리진(콤마 구분). '*' 또는 비면 전체 허용(브라우저에서 직접 호출 안 하면 무관).
     allowedOrigins: (process.env.ALLOWED_ORIGINS ?? '*').split(',').map((s) => s.trim()).filter(Boolean),
     // 키당 분당 요청 상한.
