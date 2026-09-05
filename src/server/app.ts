@@ -116,6 +116,7 @@ export function buildApp(): Hono<AppEnv> {
       '',
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
+      'GET /p/:contentId  (장소 공유 대체 페이지 — 인증 불필요)',
       'GET /privacy · /terms  (개인정보 처리방침 · 이용약관 — 인증 불필요)',
       '',
       '🔒 = X-Session-Token 필요. POST /v1/auth/email/sign-up · sign-in 으로 발급.',
@@ -155,7 +156,17 @@ export function buildApp(): Hono<AppEnv> {
     if (config.web.appleAppIds.length === 0) return c.notFound();
     // ⚠️ content-type 은 application/json 이어야 하고 리다이렉트가 없어야 한다(애플 요구사항).
     return c.json({
-      applinks: { details: [{ appIDs: config.web.appleAppIds, components: [{ '/': '/i/*' }] }] },
+      // ⚠️ 경로를 추가하면 **애플 CDN 캐시 때문에 이미 설치된 기기는 앱을 다시 받아야** 반영된다.
+      //    그래서 새 경로는 앱 배포보다 **먼저** 서버에 올려 둔다(앱 팀 요청).
+      applinks: {
+        details: [{
+          appIDs: config.web.appleAppIds,
+          components: [
+            { '/': '/i/*' },   // 플랜 초대
+            { '/': '/p/*' },   // 장소 공유
+          ],
+        }],
+      },
       webcredentials: { apps: config.web.appleAppIds },
     });
   });
@@ -220,6 +231,94 @@ export function buildApp(): Hono<AppEnv> {
        font-weight:600;padding:12px 28px;border-radius:10px;margin-bottom:20px}
   .btn2{display:inline-block;background:#EEF4F5;color:#0B5F6B;text-decoration:none;font-size:14px;
         font-weight:600;padding:10px 24px;border-radius:10px}
+</style></head><body><div class="card"><div class="logo">모두와</div>${body}</div></body></html>`);
+  });
+
+  /**
+   * 장소 공유 링크의 대체 페이지 — **앱이 설치돼 있으면 이 페이지는 뜨지 않는다**(iOS 가 앱으로
+   * 보낸다). 여기 도달했다는 건 앱이 없거나 카톡 인앱 웹뷰로 열었다는 뜻이다(/i/:code 와 같다).
+   *
+   * ⚠️ **OG 태그가 이 페이지의 핵심이다.** 카톡에서 카드로 보이느냐 파란 글씨로 보이느냐가
+   *    여기서 갈린다(앱 팀). 그래서 장소를 못 찾아도 최소한의 OG 는 넣는다.
+   *
+   * ⚠️ **모든 삽입 값을 이스케이프한다.** 장소 이름에 따옴표가 들어오는 경우가 있어, 속성값에
+   *    그대로 넣으면 태그가 깨지고 주입 경로가 된다.
+   */
+  app.get('/p/:contentId', async (c) => {
+    // ⚠️ 파라미터를 화면에 되돌리지 않는다 — 숫자만 통과시킨다(/i/:code 와 같은 규칙).
+    const id = c.req.param('contentId') ?? '';
+    if (!/^\d+$/.test(id)) return c.notFound();
+
+    const place = (await query<{
+      title: string; addr1: string | null; firstimage: string | null; contenttypeid: string | null;
+      access_wheelchair: boolean; access_visual: boolean; access_hearing: boolean;
+      access_infant: boolean; access_elderly: boolean;
+    }>(
+      `select title, addr1, firstimage, contenttypeid,
+              access_wheelchair, access_visual, access_hearing, access_infant, access_elderly
+         from barrier_free where contentid = $1`, [id],
+    )).rows[0];
+
+    const store = config.web.appStoreUrl;
+    const origin = config.web.origin;
+    const url = `${origin}/p/${id}`;
+
+    // 목록 응답의 access 라벨과 같은 순서·같은 뜻이다(app.ts 의 access 객체 참고).
+    const features = place ? ([
+      [place.access_wheelchair, '휠체어 접근'],
+      [place.access_visual, '시각 지원'],
+      [place.access_hearing, '청각 지원'],
+      [place.access_infant, '영유아 동반'],
+      [place.access_elderly, '고령자 편의'],
+    ] as const).filter(([on]) => on).map(([, label]) => label) : [];
+
+    const image = toHttps(place?.firstimage ?? null);
+    const ogTitle = place ? `${place.title} — 모두와` : '모두와 — 무장애 여행';
+    const ogDesc = place
+      ? [place.addr1, features.length ? `무장애: ${features.join(', ')}` : null]
+          .filter(Boolean).join(' · ')
+      : '앱에서 무장애 여행 정보를 확인해보세요.';
+
+    const body = place
+      ? `<p class="m">${esc(place.title)}</p>
+         ${place.addr1 ? `<p class="s">${esc(place.addr1)}</p>` : ''}
+         ${image ? `<img class="ph" src="${esc(image)}" alt="">` : ''}
+         ${features.length
+            ? `<div class="tags">${features.map((f) => `<span class="tag">${esc(f)}</span>`).join('')}</div>`
+            : '<p class="s">등록된 무장애 정보가 없어요.</p>'}
+         <a class="btn" href="moduwa://p/${id}">앱에서 열기</a>
+         ${store ? `<a class="btn2" href="${esc(store)}">앱 받기</a>` : ''}
+         <p class="src">무장애 정보 출처: 한국관광공사 TourAPI</p>`
+      : `<p class="m">찾을 수 없는 장소예요.</p>
+         <p class="s">링크가 잘못 전달됐거나 정보가 내려갔을 수 있어요.</p>
+         ${store ? `<a class="btn2" href="${esc(store)}">앱 받기</a>` : ''}`;
+
+    return c.html(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(ogTitle)}</title>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="모두와">
+<meta property="og:title" content="${esc(ogTitle)}">
+<meta property="og:description" content="${esc(ogDesc)}">
+${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
+<meta property="og:url" content="${esc(url)}">
+<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}">
+<style>
+  body{margin:0;font-family:-apple-system,'Apple SD Gothic Neo',sans-serif;background:#F7F8F8;color:#1C2B33;
+       display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .card{background:#fff;border-radius:16px;padding:40px 32px;max-width:340px;width:calc(100% - 48px);
+        text-align:center;box-shadow:0 2px 16px rgba(28,43,51,.08)}
+  .logo{font-weight:700;font-size:15px;color:#0B5F6B;letter-spacing:.02em;margin-bottom:20px}
+  .m{font-size:19px;font-weight:700;margin:0 0 6px;word-break:keep-all}
+  .s{font-size:14px;line-height:1.7;color:#5B6B73;margin:0 0 16px;word-break:keep-all}
+  .ph{width:100%;height:160px;object-fit:cover;border-radius:12px;margin:0 0 16px;background:#EEF4F5}
+  .tags{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:0 0 20px}
+  .tag{background:#EEF4F5;color:#0B5F6B;font-size:13px;font-weight:600;padding:6px 12px;border-radius:999px}
+  .btn{display:inline-block;background:#0B5F6B;color:#fff;text-decoration:none;font-size:15px;
+       font-weight:600;padding:12px 28px;border-radius:10px;margin-bottom:12px}
+  .btn2{display:inline-block;background:#EEF4F5;color:#0B5F6B;text-decoration:none;font-size:14px;
+        font-weight:600;padding:10px 24px;border-radius:10px}
+  .src{font-size:11px;color:#9AAAB1;margin:16px 0 0}
 </style></head><body><div class="card"><div class="logo">모두와</div>${body}</div></body></html>`);
   });
 
@@ -606,6 +705,23 @@ export function buildApp(): Hono<AppEnv> {
     const u = url.trim();
     return HTTPS_SAFE_HOSTS.test(u) ? u.replace(/^http:/, 'https:') : u;
   };
+
+  /**
+   * HTML 이스케이프 — 서버가 뱉는 페이지에 값을 넣을 때 반드시 거친다.
+   *
+   * ⚠️ **다섯 글자를 모두 바꾼다.** 텍스트 자리뿐 아니라 속성값(og:title 등)에도 쓰이므로
+   *    따옴표 두 종류가 빠지면 태그가 깨지고 주입 경로가 된다 — 장소 이름에 따옴표가 들어오는
+   *    경우가 실제로 있다(앱 팀 지적).
+   * ⚠️ `&` 를 **가장 먼저** 바꿔야 한다. 나중에 바꾸면 앞서 만든 `&lt;` 의 `&` 를 다시 이스케이프해
+   *    `&amp;lt;` 가 된다. URL 의 쿼리스트링에도 `&` 가 들어와 실제로 걸린다.
+   */
+  const esc = (v: unknown): string =>
+    String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
 
   // ILIKE 패턴 메타문자 이스케이프 (사용자 입력 검색어용)
   const escapeLike = (s: string) => s.replace(/[\\%_]/g, '\\$&');
