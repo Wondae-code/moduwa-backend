@@ -166,7 +166,9 @@ export const config = {
     //  만료 안내와 재발급을 쉽게 하는 것으로 보완한다.
     inviteMinutes: num('PLAN_INVITE_MINUTES', 30),
     // 소유자 포함 최대 인원. 여행 동행 규모 + 어뷰징(대량 초대) 방지.
-    memberCap: num('PLAN_MEMBER_CAP', 10),
+    //  기획 확정값 6(2026-09-05) — 실제 동행 규모가 한 자릿수이고, 합류할 때마다 소유자와
+    //  기존 멤버 전원에게 알림이 가므로(046) 인원이 늘수록 알림이 곱으로 늘어난다.
+    memberCap: num('PLAN_MEMBER_CAP', 6),
   },
 
   // ── 메일 발송 ──

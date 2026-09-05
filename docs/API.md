@@ -904,14 +904,14 @@ curl -X POST "$BASE/v1/reviews/images" \
 #### POST /v1/plan-invites/accept — 초대 수락  🔒
 
 `{code}` — 하이픈·소문자 섞여도 됩니다(`wkq3-m8dz` OK). **코드는 소비되지 않습니다** —
-단톡방 하나로 여럿이 들어오는 게 정상 시나리오라, 만료·회수·정원(10명)이 통제 장치입니다.
+단톡방 하나로 여럿이 들어오는 게 정상 시나리오라, 만료·회수·정원(**소유자 포함 6명**)이 통제 장치입니다.
 
 ```json
 { "planId": "…", "title": "강릉 공동 여행", "myRole": "editor", "alreadyMember": false }
 ```
 
 오류: `invalid_code`(400) · `invite_expired`(400 — "새 코드를 요청해주세요" 안내) ·
-`member_limit`(409, 소유자 포함 10명)
+`member_limit`(409, **소유자 포함 6명**)
 
 #### DELETE /v1/plans/:planId/invites — 초대 회수  🔒 소유자
 #### DELETE /v1/plans/:planId/members/:uuid — 강퇴 / 나가기  🔒
