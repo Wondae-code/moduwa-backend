@@ -27,8 +27,7 @@
     "stats": "tsx src/stats.ts",
     "api": "tsx src/server/index.ts",
     "start": "tsx src/server/index.ts",
-    "start:deploy": "npm run migrate && npm start",
-    "ingest:restaurants": "tsx src/ingest-restaurants.ts"
+    "start:deploy": "npm run migrate && npm start"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.8",
