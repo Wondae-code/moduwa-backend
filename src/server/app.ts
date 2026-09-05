@@ -263,13 +263,15 @@ export function buildApp(): Hono<AppEnv> {
     const origin = config.web.origin;
     const url = `${origin}/p/${id}`;
 
-    // 목록 응답의 access 라벨과 같은 순서·같은 뜻이다(app.ts 의 access 객체 참고).
+    // ⚠️ **문구의 정본은 앱이다.** 온보딩·프로필·카드·칩에 같은 단어가 박혀 있어, 여기서
+    //    다르게 쓰면 같은 장소에 두 이름이 생긴다(앱 팀 요청으로 2026-09-05 맞춤).
+    //    순서는 목록 응답의 access 객체와 같다.
     const features = place ? ([
       [place.access_wheelchair, '휠체어 접근'],
       [place.access_visual, '시각 지원'],
       [place.access_hearing, '청각 지원'],
-      [place.access_infant, '영유아 동반'],
-      [place.access_elderly, '고령자 편의'],
+      [place.access_infant, '유아 동반'],
+      [place.access_elderly, '고령자 친화'],
     ] as const).filter(([on]) => on).map(([, label]) => label) : [];
 
     const image = toHttps(place?.firstimage ?? null);
