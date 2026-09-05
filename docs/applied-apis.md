@@ -20,7 +20,7 @@ data.go.kr 마이페이지(활용신청 현황)에서 직접 탐색으로 수집
 | # | API | 수집 스크립트 | 적재 |
 |---|---|---|---|
 | 1 | 식품_관광식당 | `ingest:restaurants` | 사업장 **218**곳(영업중 142) |
-| 2 | AreaTarDivService | `ingest:areadiv` | **0건** — 아래 ⚠️ 참고 |
+| 2 | AreaTarDivService | (수집 안 함) | **0건** — 데이터는 있으나 수집하지 않기로 결정, 아래 ⚠️ 참고 |
 | 3 | TarRlteTarService1 | `ingest` | 3,570,406행 |
 | 4 | LocgoHubTarService1 | `ingest:locgo`·`ingest:locgo-detail` | 555,967 + 54,478행 |
 | 5 | KorService2 | `ingest:kor`·`ingest:kordetail` | 61,627 + 39,068행 |
@@ -29,10 +29,29 @@ data.go.kr 마이페이지(활용신청 현황)에서 직접 탐색으로 수집
 | 8 | TatsCnctrRateService | `ingest:tats` | 832,842행 |
 | 9 | KorPetTourService2 | `ingest:pet`·`ingest:pet-detail` | 9,767 + 9,767행 |
 
-> ⚠️ **AreaTarDivService 는 제공기관이 데이터를 넣지 않았다.** 세 오퍼레이션 × 시도 4곳 ×
-> 5개월 = 60개 조합을 재확인(2026-09-04)했고 **전부 `resultCode 0000`(정상)에 `totalCount 0`**
-> 이었다. 인증·파라미터 문제라면 에러 코드가 온다. 수집 코드(`ingest:areadiv`)는 완성돼 있고
-> 프로브 가드가 있어 개방되면 자동으로 수집된다.
+> ⚠️ **AreaTarDivService — 데이터는 있다. 수집하지 않기로 결정했다(2026-09-05).**
+>
+> **이전 기록 정정.** "제공기관 미개방" 으로 적어 두었으나 **틀린 진단이었다.** 공식 매뉴얼
+> (v4.0)로 확인한 결과, 지표 코드(`touDivIxCd`·`expDivIxCd`·`intlDivIxCd`)가 매뉴얼에는
+> **옵션(0)** 으로 표기돼 있지만 **없으면 `totalCount 0`** 이 온다. 필수 파라미터(`areaCd`,
+> `baseYm`)만 보낸 우리 호출이 계속 빈 결과를 받은 이유다. `resultCode 0000` + `totalCount 0`
+> 을 "데이터 없음" 으로 읽은 것이 오판이었다 — 에러가 아니라 조건 불충족이었다.
+>
+> **실제 제공 범위**: 202510~202607(10개월, 매월 16일 갱신) · 전국 17개 시도 · **272개 시군구** ·
+> 지표 20종(관광객 8·소비 8·국제 4). 전량은 3,400 호출 / 약 54,400행.
+>
+> **수집하지 않는 이유** — 지표의 성격이 우리 용도와 맞지 않는다(실측):
+> - 이름은 "다양성" 이지만 실제로는 **상권 규모**를 잰다. 상위가 강남·서초·송파·중구, 하위가
+>   울릉군·영양군이다. 여행지로서의 성격이나 접근성이 아니다.
+> - **연령별 지표가 전체 지표와 사실상 같은 값이다** — 전체↔70대 r=0.962, 전체↔10대 r=0.952.
+>   "고령자가 편한 지역" 신호를 기대했으나, 70대 방문객 상위가 강남·송파·서초다. 고령자 친화가
+>   아니라 사람 많은 곳에 노인도 많은 것이다.
+> - **시간에 따라 거의 변하지 않는다.** 강원 중앙값이 202510→202607 동안 63.3/61.4/61.5/63.6,
+>   최고 시군구는 계속 원주시다. 성수기 판단에는 `tats_region_daily`·`tats_cnctr` 가 훨씬 낫다.
+> - **시군구 단위**라 장소 단위로 후보를 고르는 추천 엔진에 쓸 자리가 없다.
+>
+> 국제적 다양성(33)만 전체 지표와 상관이 낮아(r=0.454) 새로운 축이지만, 무장애 여행 추천에
+> 쓸 근거가 되지 않는다. 용도가 생기면 지표 코드를 넣어 호출하면 바로 받을 수 있다.
 
 > ⚠️ **식품_관광식당은 다른 API 와 두 가지가 다르다.**
 > ① `_type=json` 이 아니라 **`type=json`** 을 받는다(행안부 규약).
@@ -49,7 +68,9 @@ data.go.kr 마이페이지(활용신청 현황)에서 직접 탐색으로 수집
 **1. 식품_관광식당** (`/1741000/tourist_restaurants`)
 - `/info` 데이터 조회 (매일 갱신, 2일전 기준) · `/history` 이력조회 (2026.01.01~)
 
-**2. 지역별 관광 다양성** (`AreaTarDivService`)
+**2. 지역별 관광 다양성** (`AreaTarDivService`) — 수집 안 함(위 ⚠️)
+- ⚠️ 매뉴얼 v4.0 의 서비스 명세표는 3번 오퍼레이션을 `areaTarDivService` 로 적었으나 **오타**다.
+  실제 이름은 `areaIntlDivList` 이며 매뉴얼 뒤쪽 Call Back URL 이 맞다.
 - `/areaTouDivList` 관광객 다양성(연령별 방문객수)
 - `/areaExpDivList` 소비 다양성(연령별 신용카드 소비액)
 - `/areaIntlDivList` 국제적 다양성
@@ -85,7 +106,7 @@ data.go.kr 마이페이지(활용신청 현황)에서 직접 탐색으로 수집
 | DataLab `/metcoRegnVisitrDDList` | `startYmd`, `endYmd` (YYYYMMDD) | 시도×일×관광객유형 | areaCode, areaNm, baseYmd, daywkDivCd/Nm, touDivCd/Nm(현지인/외지인/외국인), touNum |
 | DataLab `/locgoRegnVisitrDDList` | `startYmd`, `endYmd` | 시군구×일×유형 (3일 2,376) | signguCode, signguNm, baseYmd, daywkDiv*, touDiv*, touNum |
 | TatsCnctrRateService `/tatsCnctrRatedList` | `areaCd`, `signguCd` | 시군구별 향후 30일 (원주 1,650) | baseYmd, areaCd, signguCd, tAtsNm, cnctrRate |
-| AreaTarDivService `/areaTouDivList`·`/areaExpDivList`·`/areaIntlDivList` | `areaCd`, `baseYm` | ⚠️ 전 조합 0건(120개 검증) — 제공기관 데이터 **미개방**. 크롤러는 완성(`ingest:areadiv`, 프로브 가드로 데이터 개방 시 자동 수집) | - |
+| AreaTarDivService `/areaTouDivList`·`/areaExpDivList`·`/areaIntlDivList` | `areaCd`, `baseYm`, **+ 지표코드**(`touDivIxCd`/`expDivIxCd`/`intlDivIxCd`) | ⚠️ 지표코드는 매뉴얼상 옵션이지만 **없으면 0건**. `signguCd` 를 빼면 그 시도의 전 시군구가 한 번에 온다(서울 26행) | baseYm, areaCd, areaNm, signguCd, signguNm, {tou\|exp\|intl}DivIxCd/Nm/Val |
 
 - 인증키 공용, 각 서비스 일일 트래픽 독립.
 - 법정동 코드체계(areaCd 2자리 시도, signguCd 5자리). 시군구 목록은 [src/sigungu-codes.json](../src/sigungu-codes.json) 재사용.
