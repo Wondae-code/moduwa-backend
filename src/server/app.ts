@@ -1659,7 +1659,16 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
       [planId],
     )).rows;
 
-    return c.json({ ...plan, myRole: role, members, days: await loadDays(planId) });
+    return c.json({
+      ...plan, myRole: role, members,
+      // 남은 자리를 앱이 계산할 수 있게 분모를 함께 준다(앱 팀 요청).
+      //  ⚠️ **둘 다 소유자를 포함한다.** members 배열이 소유자를 포함하므로 기준을 맞춰야
+      //     memberCap - memberCount 가 그대로 남은 자리가 된다. 한쪽만 제외하면 앱이 한 자리를
+      //     더 있는 것으로 표시하고, 링크를 뿌린 사람은 마지막 한 명이 거절당한 뒤에야 안다.
+      memberCount: members.length,
+      memberCap: config.plans.memberCap,
+      days: await loadDays(planId),
+    });
   });
 
   // 새 플랜 플로우 4/6·5/6 의 선택지. 표시 문구를 앱에 하드코딩하지 않고 여기서 내려보낸다 —
@@ -2078,12 +2087,20 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
       )).rows[0]!.expires_at
     }))
 
+    // 링크를 막 뿌리려는 순간이라 남은 자리가 여기서 가장 쓸모 있다 — 플랜 상세를 다시
+    //  부르지 않아도 "앞으로 3명 더 받을 수 있어요" 를 바로 띄울 수 있다.
+    const memberCount = (await query<{ n: number }>(
+      `select 1 + (select count(*) from plan_members where plan_id = $1) as n`, [planId],
+    )).rows[0]!.n
     return c.json({
       code,
       // 유니버설 링크. 앱이 있으면 바로 앱이 열리고, 없으면 /i/:code 대체 페이지가 받는다.
       inviteUrl: `${config.web.origin}/i/${code}`,
       expiresAt: expires.toISOString(),
       expiresInMinutes: config.plans.inviteMinutes,
+      // 플랜 상세와 같은 기준(소유자 포함).
+      memberCount,
+      memberCap: config.plans.memberCap,
     }, 201)
   })
 

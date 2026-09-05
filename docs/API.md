@@ -913,6 +913,15 @@ curl -X POST "$BASE/v1/reviews/images" \
 오류: `invalid_code`(400) · `invite_expired`(400 — "새 코드를 요청해주세요" 안내) ·
 `member_limit`(409, **소유자 포함 6명**)
 
+**남은 자리**는 플랜 상세와 초대 발급 응답에 함께 옵니다:
+
+```jsonc
+{ "memberCount": 3, "memberCap": 6 }   // 남은 자리 = memberCap - memberCount
+```
+
+- ⚠️ **둘 다 소유자를 포함합니다.** `members` 배열이 소유자를 포함하므로 기준을 맞췄습니다 — 한쪽만 제외하면 앱이 한 자리를 더 있는 것으로 표시하고, 링크를 뿌린 사람은 마지막 한 명이 거절당한 뒤에야 알게 됩니다
+- 정원은 **서버 설정값**(`PLAN_MEMBER_CAP`)입니다. 앱에 숫자를 박지 마세요 — 바뀌면 앱이 거짓말을 합니다
+
 #### DELETE /v1/plans/:planId/invites — 초대 회수  🔒 소유자
 #### DELETE /v1/plans/:planId/members/:uuid — 강퇴 / 나가기  🔒
 
