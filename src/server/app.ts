@@ -952,6 +952,19 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     if (contentId) { filters.push(contentId); where.push(`r.content_id = $${filters.length}`); }
     // 시안의 "사진/영상 후기만 보기". image_urls 가 null 인 행도 있어 coalesce 로 감싼다.
     if (c.req.query('hasImage') === 'true') where.push('coalesce(array_length(r.image_urls, 1), 0) > 0');
+
+    // 방문 조건으로 좁힌다(051) — "휠체어로 방문한 분들의 후기만 보기".
+    //  ⚠️ **visitor 종류만 받는다.** place 태그까지 받으면 이 파라미터가 "장소 평가 필터" 로도
+    //     쓰이게 되어 두 축이 섞인다. 장소 평가로 거르는 기능이 필요해지면 별도 파라미터로 연다.
+    //  ⚠️ 값을 그대로 이어 붙이지 않는다 — 파라미터로 넘기고, 정의에 없는 코드는 그냥 0건이 된다.
+    const visitorTag = c.req.query('visitorTag')?.trim();
+    if (visitorTag) {
+      filters.push(visitorTag);
+      where.push(`exists (select 1 from review_tags rt
+                            join review_tag_defs d on d.code = rt.tag_code
+                           where rt.review_id = r.id and d.kind = 'visitor'
+                             and rt.tag_code = $${filters.length})`);
+    }
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
 
     const total = (await query<{ n: number }>(
@@ -965,10 +978,16 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   // 후기 태그 카탈로그(019) — 작성 화면의 "어떤 점이 좋았나요?" 칩 목록.
   //  DB 가 원본이라 문구·순서·아이콘이 바뀌어도 앱 재배포가 필요 없다.
   //  icon 이 null 인 태그는 아직 브랜드 에셋이 없다는 뜻 — 클라이언트는 텍스트만 렌더한다.
+  //  ⚠️ kind 로 두 종류를 가른다(051) — place 는 장소 평가("음식이 맛있어요"),
+  //     visitor 는 방문 조건("휠체어로 방문했어요")이다. 앱은 작성 화면에서 두 묶음을
+  //     따로 보여 준다. ?kind= 로 한쪽만 받을 수도 있다.
   v1.get('/review-tags', async (c) => {
+    const kind = c.req.query('kind')?.trim();
+    const where = kind === 'place' || kind === 'visitor' ? 'where kind = $1' : '';
     const rows = (await query(
-      `select code, label, short_label as "shortLabel", icon
-         from review_tag_defs order by sort_order, code`,
+      `select code, label, short_label as "shortLabel", icon, kind
+         from review_tag_defs ${where} order by sort_order, code`,
+      where ? [kind] : [],
     )).rows;
     return c.json({ count: rows.length, items: rows });
   });
@@ -1000,7 +1019,9 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
          from review_tags rt
          join reviews r        on r.id = rt.review_id
          join review_tag_defs d on d.code = rt.tag_code
-        where r.content_id = $1 and ${blockFilter('r.author_id', 2)}
+        -- ⚠️ 장소 평가 태그만 집계한다(051). 방문 조건을 섞으면 "21명이 무장애 친화적이라고
+        --    했다" 와 "21명이 휠체어로 방문했다" 가 같은 막대에 서서 뜻이 깨진다.
+        where r.content_id = $1 and d.kind = 'place' and ${blockFilter('r.author_id', 2)}
         group by d.code, d.label, d.short_label, d.icon, d.sort_order
         order by count desc, d.sort_order`, [contentId, viewerId],
     )).rows;
@@ -1094,7 +1115,10 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   const MAX_BODY_LEN = 2000;
   const MAX_IMAGES = 5;      // 앱 리뷰 카드가 1~5장 레이아웃 기준(014 참고)
   const MAX_NICKNAME_LEN = 40;
-  const MAX_TAGS = 8;        // 카탈로그 전체 개수. 전부 고르는 것까지는 허용한다
+  // 카탈로그 전체 개수(장소 평가 8 + 방문 조건 5). 전부 고르는 것까지는 허용한다.
+  //  ⚠️ 051 에서 방문 조건 5개가 늘어 8 → 13 이다. 이 값이 카탈로그보다 작으면 사용자가 다
+  //     고를 수 없고, 왜 400 이 나는지 화면에서 알 수 없다. 태그를 추가하면 여기도 올린다.
+  const MAX_TAGS = 13;
 
   v1.post('/reviews', async (c) => {
     let payload: unknown;
