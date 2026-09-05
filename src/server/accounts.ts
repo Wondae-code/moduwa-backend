@@ -41,6 +41,8 @@ export type SignInResult = {
   onboarded: boolean;
   /** 프로필 사진(042). 로그인 직후에도 앱이 아바타를 바로 그릴 수 있게 함께 준다. */
   avatarUrl: string | null;
+  /** 접근성 특성은 있는데 동의 기록이 없다(050) — 앱이 다시 물어야 한다. */
+  needsSensitiveConsent: boolean;
 };
 
 // 새 계정에 닉네임이 없을 때의 값. authors.nickname 이 not null 이라 무언가는 있어야 하고,
@@ -121,6 +123,8 @@ export async function signIn(params: {
    *    사용자가 나중에 직접 고친 프로필이 온보딩 기본값으로 되돌아간다.
    */
   accessFeatures?: string[];
+  /** 민감정보(접근성 특성) 수집·이용 동의. accessFeatures 가 비어 있지 않을 때만 의미가 있다. */
+  sensitiveConsent?: boolean;
 }): Promise<SignInResult> {
   const { identity, deviceId } = params;
   const nickname = (params.nickname ?? '').trim();
@@ -145,11 +149,18 @@ export async function signIn(params: {
       // 새 계정. authors.device_id 는 채우지 않는다 — 바인딩은 author_devices 가 맡는다.
       //  onboarded_at 은 accessFeatures 가 실려 왔을 때만 찍는다. 빈 배열만으로는
       //  "아무것도 고르지 않았다"와 "온보딩을 안 했다"를 구분할 수 없다(030 주석).
+      // ⚠️ 민감정보 동의는 값이 실제로 있을 때만 찍는다. 빈 배열에 동의 기록을 남기면,
+      //    나중에 값을 채울 때 묻지 않고 저장하게 된다(050).
+      const consented = Boolean(params.sensitiveConsent) && (params.accessFeatures ?? []).length > 0;
       authorId = (await client.query<{ id: number }>(
-        `insert into authors (nickname, access_features, onboarded_at)
-         values ($1, $2, case when $3::boolean then now() else null end)
+        `insert into authors (nickname, access_features, onboarded_at,
+                              sensitive_consent_at, sensitive_consent_ver)
+         values ($1, $2, case when $3::boolean then now() else null end,
+                 case when $4::boolean then now() else null end,
+                 case when $4::boolean then $5 else null end)
          returning id`,
-        [nickname || FALLBACK_NICKNAME, params.accessFeatures ?? [], params.accessFeatures != null],
+        [nickname || FALLBACK_NICKNAME, params.accessFeatures ?? [], params.accessFeatures != null,
+         consented, SENSITIVE_NOTICE_VERSION],
       )).rows[0]!.id;
       created = true;
 
@@ -180,9 +191,10 @@ export async function signIn(params: {
     const row = (await client.query<{
       uuid: string; nickname: string; email: string | null; verified: Date | null;
       access_features: string[]; onboarded_at: Date | null; avatar_url: string | null;
+      consent_at: Date | null;
     }>(
       `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at,
-              avatar_url
+              avatar_url, sensitive_consent_at as consent_at
          from authors where id = $1`,
       [authorId],
     )).rows[0]!;
@@ -191,6 +203,8 @@ export async function signIn(params: {
       email: row.email, emailVerified: row.verified != null,
       accessFeatures: row.access_features, onboarded: row.onboarded_at != null,
       avatarUrl: row.avatar_url,
+      // 값은 있는데 동의 기록이 없는 계정 — 앱이 다시 물어야 한다(050 주석).
+      needsSensitiveConsent: row.access_features.length > 0 && row.consent_at == null,
     };
   });
 }
@@ -226,10 +240,21 @@ export async function setEmailPassword(authorId: number, passwordHash: string): 
  * onboarded_at 은 features 가 실제로 온 경우에만 찍는다 — 프로필에서 닉네임만 바꾼 것을
  * "온보딩을 마쳤다" 로 해석하면 앱이 온보딩을 다시 띄울 기회를 잃는다(030 주석과 같은 이유).
  */
+/**
+ * 접근성 특성 고지문의 현재 버전.
+ *
+ * ⚠️ **고지 문구를 바꾸면 이 값도 올린다.** 무엇에 동의했는지가 달라지기 때문이다. 값이 바뀌면
+ *    기존 동의는 옛 버전으로 남고, 다시 받아야 할지는 변경의 크기로 판단한다(문구 다듬기는
+ *    그대로 두고, 수집 항목·목적이 바뀌면 다시 받는다).
+ */
+export const SENSITIVE_NOTICE_VERSION = '2026-09-05';
+
 export async function updateProfile(authorId: number, patch: {
   nickname?: string;
   avatarUrl?: string | null;
   features?: string[];
+  /** 민감정보 동의 여부. features 를 채울 때만 의미가 있다(빈 배열은 철회다). */
+  sensitiveConsent?: boolean;
 }): Promise<void> {
   const sets: string[] = [];
   const vals: unknown[] = [authorId];
@@ -241,6 +266,17 @@ export async function updateProfile(authorId: number, patch: {
   if (patch.features !== undefined) {
     add('access_features = ?', patch.features);
     sets.push('onboarded_at = coalesce(onboarded_at, now())');
+
+    // ⚠️ **동의 기록은 값과 함께 움직인다.** 민감정보라 "무엇을 언제 동의받아 저장했는가" 가
+    //    남아야 입증이 된다(050).
+    if (patch.features.length === 0) {
+      // 빈 배열 = 지우기 = **동의 철회**. 기록도 함께 지운다 — 값이 없는데 동의만 남아 있으면
+      //  나중에 다시 등록할 때 묻지 않고 저장하게 된다.
+      sets.push('sensitive_consent_at = null', 'sensitive_consent_ver = null');
+    } else if (patch.sensitiveConsent) {
+      add('sensitive_consent_ver = ?', SENSITIVE_NOTICE_VERSION);
+      sets.push('sensitive_consent_at = now()');
+    }
   }
   if (sets.length === 0) return;
 

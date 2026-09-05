@@ -123,12 +123,20 @@ type AuthorView = {
   onboarded: boolean;
   /** 프로필 사진(042). 없으면 null — 앱이 이니셜 원을 그린다. */
   avatarUrl: string | null;
+  /**
+   * 접근성 특성은 있는데 **동의 기록이 없다**(050). 앱이 동의를 다시 받아야 한다.
+   *
+   * 동의를 안 받았다는 뜻이 아니라 기록하지 않았다는 뜻이다 — 기록을 시작하기 전에 등록한
+   * 계정들이 여기 해당한다. 거부하면 앱이 accessFeatures 를 빈 배열로 보내 지운다.
+   */
+  needsSensitiveConsent: boolean;
 };
 
 function viewOf(r: SignInResult): AuthorView {
   return {
     uuid: r.uuid, nickname: r.nickname, email: r.email, emailVerified: r.emailVerified,
     accessFeatures: r.accessFeatures, onboarded: r.onboarded, avatarUrl: r.avatarUrl,
+    needsSensitiveConsent: r.needsSensitiveConsent,
   };
 }
 
@@ -177,9 +185,10 @@ async function loadAuthorView(authorId: number): Promise<AuthorView | null> {
   const row = (await query<{
     uuid: string; nickname: string; email: string | null; verified: Date | null;
     access_features: string[]; onboarded_at: Date | null; avatar_url: string | null;
+    consent_at: Date | null;
   }>(
     `select uuid, nickname, email, email_verified_at as verified, access_features, onboarded_at,
-            avatar_url
+            avatar_url, sensitive_consent_at as consent_at
        from authors where id = $1`,
     [authorId],
   )).rows[0];
@@ -192,6 +201,8 @@ async function loadAuthorView(authorId: number): Promise<AuthorView | null> {
     accessFeatures: row.access_features,
     onboarded: row.onboarded_at != null,
     avatarUrl: row.avatar_url,
+    // 값은 있는데 동의 기록이 없다 — 앱이 다시 물어야 한다(050).
+    needsSensitiveConsent: row.access_features.length > 0 && row.consent_at == null,
   };
 }
 
@@ -239,6 +250,14 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       : (Array.isArray(p.accessFeatures)
           ? p.accessFeatures.filter((v): v is string => typeof v === 'string' && v.length <= 40).slice(0, MAX_ACCESS_FEATURES)
           : []);
+    // ⚠️ **가입 경로도 PATCH /me 와 같은 규칙으로 막는다**(050). 여기를 열어 두면 가드가
+    //    무의미하다 — 동의 없이 민감정보를 넣고 싶으면 가입 요청에 실어 보내면 그만이다.
+    if (accessFeatures && accessFeatures.length > 0 && p.sensitiveConsent !== true) {
+      return c.json({
+        error: 'sensitive_consent_required',
+        message: '접근성 특성은 민감정보라 별도 동의가 필요합니다. sensitiveConsent 를 true 로 함께 보내주세요.',
+      }, 400);
+    }
 
     if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
       return c.json({ error: 'invalid_email', message: '이메일 형식이 올바르지 않습니다.' }, 400);
@@ -265,6 +284,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       nickname,
       passwordHash,
       accessFeatures,
+      sensitiveConsent: p.sensitiveConsent === true,
     });
     // 가입 직후 인증 코드를 보낸다. 실패해도 가입은 성공으로 둔다 — 앱에서 재발송할 수 있다.
     await issueAndSend(result.authorId, 'verify', email);
@@ -344,6 +364,14 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       : (Array.isArray(p.accessFeatures)
           ? p.accessFeatures.filter((v): v is string => typeof v === 'string' && v.length <= 40).slice(0, MAX_ACCESS_FEATURES)
           : []);
+    // ⚠️ **가입 경로도 PATCH /me 와 같은 규칙으로 막는다**(050). 여기를 열어 두면 가드가
+    //    무의미하다 — 동의 없이 민감정보를 넣고 싶으면 가입 요청에 실어 보내면 그만이다.
+    if (accessFeatures && accessFeatures.length > 0 && p.sensitiveConsent !== true) {
+      return c.json({
+        error: 'sensitive_consent_required',
+        message: '접근성 특성은 민감정보라 별도 동의가 필요합니다. sensitiveConsent 를 true 로 함께 보내주세요.',
+      }, 400);
+    }
 
     if (!idToken) {
       return c.json({ error: 'missing_idToken', message: '로그인 토큰이 없습니다.' }, 400);
@@ -381,6 +409,7 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       // 구글·카카오는 토큰에 이름이 있고, 애플은 앱이 보내 준다. 없으면 signIn 이 기본값을 쓴다.
       nickname: nickname || profile.name || '',
       accessFeatures,
+      sensitiveConsent: p.sensitiveConsent === true,
     });
 
     // 프로바이더가 이메일 소유를 확인했다고 말하면 우리 계정도 인증된 것으로 본다 —
@@ -566,7 +595,12 @@ export function buildAuthRoutes(): Hono<AppEnv> {
 
     // 부분 갱신이다 — 온 키만 바꾼다. 세 값의 "없음" 이 서로 달라서 각각 따로 본다
     //  (accounts.updateProfile 주석 참고).
-    const patch: { nickname?: string; avatarUrl?: string | null; features?: string[] } = {};
+    const patch: {
+      nickname?: string;
+      avatarUrl?: string | null;
+      features?: string[];
+      sensitiveConsent?: boolean;
+    } = {};
 
     if (p.nickname !== undefined) {
       if (typeof p.nickname !== 'string') {
@@ -607,6 +641,18 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       if (!Array.isArray(p.accessFeatures)) {
         return c.json({ error: 'invalid_accessFeatures', message: 'accessFeatures 는 문자열 배열이어야 합니다.' }, 400);
       }
+      // ⚠️ **동의 없이는 민감정보를 저장하지 않는다**(050). 장애 관련 정보라 별도 동의가
+      //    필요하고, 서버가 받아 놓고 나중에 "동의받았다" 를 증명할 수 없으면 안 된다.
+      //    비우는 요청(빈 배열)은 **철회**라 동의가 필요 없다 — 지우는 것까지 막으면
+      //    이용자가 자기 정보를 뺄 수 없게 된다.
+      const wantsSensitive = p.accessFeatures.length > 0;
+      if (wantsSensitive && p.sensitiveConsent !== true) {
+        return c.json({
+          error: 'sensitive_consent_required',
+          message: '접근성 특성은 민감정보라 별도 동의가 필요합니다. sensitiveConsent 를 true 로 함께 보내주세요.',
+        }, 400);
+      }
+      patch.sensitiveConsent = p.sensitiveConsent === true;
       // 값은 검증하지 않는다(앱이 항목을 늘려도 서버 배포 없이 따라가야 한다). 개수와 길이만 막는다.
       patch.features = p.accessFeatures
         .filter((v): v is string => typeof v === 'string' && v.length <= 40)
