@@ -9,7 +9,8 @@ import {
   loginAttemptsLeft, recordFailedLogin, requireLogin, setSessionCookie,
 } from './dashboard-auth';
 import {
-  browse, listTables, overview, reportCounts, reportGroups, resolveReports, runConsoleQuery,
+  browse, IMAGE_SOURCES, imageRegions, listTables, overview, placeImages,
+  reportCounts, reportGroups, resolveReports, runConsoleQuery,
 } from './dashboard-data';
 import { dashboardPage, loginPage } from './dashboard-page';
 
@@ -63,6 +64,31 @@ export function buildDashboard(): Hono {
     const offset = Math.min(100_000, Math.max(0, Number(c.req.query('offset') ?? 0) || 0));
     try {
       return c.json(await browse(table, limit, offset));
+    } catch (err) {
+      return c.json({ error: 'bad_request', message: (err as Error).message }, 400);
+    }
+  });
+
+  // ── 수집한 장소 사진 갤러리 ──
+  dash.get('/api/images', async (c) => {
+    const source = c.req.query('source') ?? 'barrier_free';
+    const limit = Math.min(120, Math.max(1, Number(c.req.query('limit') ?? 60) || 60));
+    const offset = Math.min(100_000, Math.max(0, Number(c.req.query('offset') ?? 0) || 0));
+    try {
+      const [regions, page] = await Promise.all([
+        imageRegions(),
+        placeImages({
+          source,
+          region: c.req.query('region')?.trim() || undefined,
+          q: c.req.query('q')?.trim() || undefined,
+          // 기본은 "사진 있는 것". missing=1 이면 반대로 — 수집 구멍을 찾는 쪽이다.
+          withImage: c.req.query('missing') !== '1',
+          limit,
+          offset,
+        }),
+      ]);
+      const sources = Object.entries(IMAGE_SOURCES).map(([key, v]) => ({ key, label: v.label }));
+      return c.json({ ...page, sources, regions });
     } catch (err) {
       return c.json({ error: 'bad_request', message: (err as Error).message }, 400);
     }

@@ -6,6 +6,7 @@
 import type pg from 'pg';
 import { config } from '../config';
 import { pool } from '../db';
+import { toHttps } from './image-url';
 
 export type TableStat = {
   name: string;
@@ -464,4 +465,109 @@ export async function resolveReports(
         `update reports set resolved_at = null, resolved_note = null
           where target_type = $1 and target_id = $2`, [targetType, targetId]);
   return res.rowCount ?? 0;
+}
+
+// ── 수집한 장소 사진 갤러리 ─────────────────────────────────────────────────
+//
+//  수집 대시보드의 숫자는 "몇 건 받았나" 까지만 말해 준다. 사진이 실제로 그 장소의 것인지,
+//  링크가 살아 있는지는 눈으로 봐야 안다 — 그걸 보는 화면이다.
+//
+//  ⚠️ **테이블마다 컬럼 이름이 다르다.** 다섯 곳이 제각각이라(contentid/content_id/hub_tats_cd,
+//     title/hub_tats_nm, ldong_regn_cd/area_cd) introspection 으로 맞히려 들면 조용히 엉뚱한
+//     컬럼을 집는다. 고정 맵으로 적어 두고 **여기 없는 것은 아예 못 부른다**(fail-closed).
+//     아래 문자열이 SQL 에 그대로 들어가므로, 이 맵이 화이트리스트 겸 방어선이다.
+export type ImageSource = {
+  table: string; id: string; title: string; img: string;
+  img2: string | null; addr: string | null; regn: string; label: string;
+};
+
+export const IMAGE_SOURCES: Record<string, ImageSource> = {
+  barrier_free: {
+    table: 'barrier_free', id: 'contentid', title: 'title', img: 'firstimage',
+    img2: 'firstimage2', addr: 'addr1', regn: 'ldong_regn_cd', label: '무장애 여행지',
+  },
+  kor_poi: {
+    table: 'kor_poi', id: 'content_id', title: 'title', img: 'firstimage',
+    img2: 'firstimage2', addr: 'addr1', regn: 'ldong_regn_cd', label: '국문 관광정보',
+  },
+  pet_tour_poi: {
+    table: 'pet_tour_poi', id: 'contentid', title: 'title', img: 'firstimage',
+    img2: 'firstimage2', addr: 'addr1', regn: 'ldong_regn_cd', label: '반려동물 동반',
+  },
+  locgo_hub_detail: {
+    // 이 테이블만 주소가 없다(지역 코드와 카테고리뿐). addr 을 null 로 두면 화면이 알아서 뺀다.
+    table: 'locgo_hub_detail', id: 'hub_tats_cd', title: 'hub_tats_nm', img: 'firstimage',
+    img2: 'firstimage2', addr: null, regn: 'area_cd', label: '지역관광 허브',
+  },
+  unsurveyed_dining: {
+    // 사진 컬럼이 하나뿐이다 — img2 가 null 이면 두 번째 사진 자리를 만들지 않는다.
+    table: 'unsurveyed_dining', id: 'content_id', title: 'title', img: 'firstimage',
+    img2: null, addr: 'addr1', regn: 'ldong_regn_cd', label: '미조사 식당',
+  },
+};
+
+export type PlaceImage = {
+  id: string; title: string; addr: string | null; img: string | null; img2: string | null;
+};
+
+export type ImageRegion = { code: string; label: string };
+
+/**
+ * 지역 필터용 시·도 목록.
+ *
+ *  region_slugs 는 시·군·구까지 있지만 38행뿐이라 시·군 단위로는 대부분이 안 걸린다
+ *  (barrier_free 10,274 행 중 2,623 행만 매칭). 시·도 단위(signgu_cd is null)로는 10,271 행이
+ *  걸리므로 이 화면은 시·도만 쓴다. regn_cd 가 겹치는 행이 있어 distinct 로 접는다.
+ */
+export async function imageRegions(): Promise<ImageRegion[]> {
+  const res = await readOnlyQuery<ImageRegion>(
+    `select distinct regn_cd as code, label from region_slugs
+      where signgu_cd is null order by code`,
+  );
+  return res.rows;
+}
+
+/**
+ * 한 수집 테이블의 사진 목록.
+ *
+ * @param withImage true = 사진 있는 것만 / false = **사진이 없는 것만**(수집 구멍 찾기)
+ *
+ *  ⚠️ 빈 문자열도 "사진 없음" 으로 센다. TourAPI 는 사진이 없을 때 null 이 아니라 '' 을 준다 —
+ *     null 만 보면 사진 없는 장소가 "있음" 쪽에 섞여 들어와 갤러리에 깨진 칸으로 뜬다.
+ */
+export async function placeImages(opts: {
+  source: string; region?: string; q?: string; withImage: boolean; limit: number; offset: number;
+}): Promise<{ total: number; items: PlaceImage[] }> {
+  const s = IMAGE_SOURCES[opts.source];
+  if (!s) throw new Error(`알 수 없는 소스: ${opts.source}`);
+
+  const params: unknown[] = [];
+  const where: string[] = [
+    opts.withImage
+      ? `${s.img} is not null and ${s.img} <> ''`
+      : `(${s.img} is null or ${s.img} = '')`,
+  ];
+  if (opts.region) { params.push(opts.region); where.push(`${s.regn} = $${params.length}`); }
+  // 검색어는 파라미터로 넘긴다. like 메타문자(% _)는 사용자가 넣어도 검색 범위가 넓어질 뿐이라
+  //  막지 않는다 — 읽기 전용 트랜잭션이고 다른 테이블로 새지 않는다.
+  if (opts.q) { params.push(`%${opts.q}%`); where.push(`${s.title} ilike $${params.length}`); }
+  const wsql = `where ${where.join(' and ')}`;
+
+  const total = (await readOnlyQuery<{ n: number }>(
+    `select count(*)::int n from public."${s.table}" ${wsql}`, params)).rows[0]!.n;
+
+  const items = (await readOnlyQuery<PlaceImage>(
+    `select ${s.id}::text as id, ${s.title} as title,
+            ${s.addr ?? 'null'} as addr,
+            nullif(${s.img}, '') as img,
+            ${s.img2 ? `nullif(${s.img2}, '')` : 'null'} as img2
+       from public."${s.table}" ${wsql}
+      order by ${s.id} limit ${opts.limit} offset ${opts.offset}`, params)).rows;
+
+  // ⚠️ http 인 채로 내보내면 **https 대시보드에서 브라우저가 차단해 그냥 안 보인다.**
+  //    수집 원본의 절반 가까이가 http 라, 이 한 줄이 없으면 갤러리가 "링크 깨짐" 밭이 된다.
+  return {
+    total,
+    items: items.map((r) => ({ ...r, img: toHttps(r.img), img2: toHttps(r.img2) })),
+  };
 }

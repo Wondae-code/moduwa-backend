@@ -117,6 +117,29 @@ select, input[type=text] {
 code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 .cellnull { color: var(--muted); font-style: italic; }
 .loading { color: var(--muted); padding: 16px; }
+
+/* 사진 갤러리 — 열 수를 고정하지 않는다. 화면이 좁으면 알아서 줄고, 넓으면 늘어난다. */
+.gal { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.gal .card { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+/* 높이를 고정해야 사진 비율이 제각각이어도 격자가 흔들리지 않는다. */
+.gal .shot { position: relative; display: block; height: 130px; background: var(--code); }
+.gal .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gal .shot.dead { display: flex; align-items: center; justify-content: center;
+  color: var(--bad); font-size: 12px; text-align: center; padding: 8px; }
+.gal .shot.none { display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 12px; }
+.gal .cap { padding: 8px 10px; }
+.gal .nm { font-weight: 600; font-size: 13px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gal .ad { color: var(--muted); font-size: 11px; margin-top: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* id 는 길이가 제각각이다 — barrier_free 는 7자리 숫자지만 locgo_hub_detail 은 32자 해시다.
+   넘치게 두면 카드 밖으로 삐져나가 격자가 어긋난다. */
+.gal .id { color: var(--muted); font-size: 11px; margin-top: 4px; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gal .id code { max-width: 100%; }
+.gal .two { display: flex; gap: 1px; height: 130px; }
+.gal .two .shot { flex: 1; height: 130px; }
 `;
 
 const LOGIN_STYLE = `
@@ -179,6 +202,7 @@ export function dashboardPage(): string {
   <div class="tabs">
     <button class="tab on" data-tab="overview">개요</button>
     <button class="tab" data-tab="tables">테이블</button>
+    <button class="tab" data-tab="images">사진</button>
     <button class="tab" data-tab="reports">신고<span class="badge" id="rbadge"></span></button>
     <button class="tab" data-tab="sql">SQL</button>
   </div>
@@ -195,6 +219,21 @@ export function dashboardPage(): string {
       <span class="hint" id="tinfo"></span>
     </div>
     <div class="panel scroll" id="tbody"></div>
+  </section>
+  <section id="images">
+    <div class="row">
+      <select id="isrc"></select>
+      <select id="ireg"><option value="">전국</option></select>
+      <select id="imiss">
+        <option value="0">사진 있는 곳</option>
+        <option value="1">사진 없는 곳</option>
+      </select>
+      <input type="text" id="iq" placeholder="장소명 검색" style="width:180px">
+      <button class="act" id="iprev">◀ 이전</button>
+      <button class="act" id="inext">다음 ▶</button>
+      <span class="hint" id="iinfo"></span>
+    </div>
+    <div id="ibody"><div class="loading">불러오는 중…</div></div>
   </section>
   <section id="reports">
     <div class="row">
@@ -293,9 +332,108 @@ for (var i = 0; i < tabs.length; i++) {
     document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('on', t === btn); });
     document.querySelectorAll('section').forEach(function (s) { s.classList.toggle('on', s.id === name); });
     if (name === 'tables' && !window.__tablesReady) loadTableList();
+    if (name === 'images') loadImages();
     if (name === 'reports') loadReports();
   });
 }
+
+// ── 수집한 장소 사진 갤러리 ──
+//  숫자만으로는 수집이 잘 됐는지 알 수 없다. 사진이 그 장소의 것인지, 링크가 살아 있는지는
+//  눈으로 봐야 한다. "사진 없는 곳" 으로 뒤집으면 수집 구멍을 그대로 볼 수 있다.
+var IOFF = 0, ILIMIT = 60, ifilled = false;
+
+//  ⚠️ DB 값을 그대로 href 에 넣지 않는다. 지금 데이터는 전부 tong.visitkorea.or.kr 이지만
+//     수집원이 늘면 무엇이 들어올지 우리가 정하지 않는다 — http(s) 가 아니면 링크를 안 건다.
+//  ⚠️ **여기서 정규식을 쓰지 말 것.** 이 스크립트는 TS 템플릿 리터럴 안에 들어 있어서
+//     역슬래시가 먹힌다 — /^https?:\/\// 라고 쓰면 브라우저에는 /^https?:/// 로 도착해
+//     SyntaxError 가 나고, 그 순간 **대시보드 스크립트 전체가 죽는다**(탭 전환까지).
+var safeUrl = function (u) {
+  if (typeof u !== 'string') return null;
+  var v = u.trim();
+  return (v.slice(0, 7) === 'http://' || v.slice(0, 8) === 'https://') ? v : null;
+};
+
+//  깨진 링크를 빈 칸으로 두면 "사진이 없는 곳" 과 구별이 안 된다. 둘은 다른 문제다.
+window.imgDead = function (el) {
+  var p = el.parentNode;
+  if (!p) return;
+  p.classList.add('dead');
+  p.textContent = '✕ 링크 깨짐';
+};
+
+function shot(u) {
+  var safe = safeUrl(u);
+  if (!safe) return '<span class="shot none">사진 없음</span>';
+  // referrerpolicy: 원본 서버에 대시보드 주소를 흘리지 않는다.
+  // loading=lazy: 한 페이지에 최대 120장이라 스크롤 전에 다 받으면 느리다.
+  return '<a class="shot" href="' + esc(safe) + '" target="_blank" rel="noopener noreferrer">'
+       + '<img src="' + esc(safe) + '" alt="" loading="lazy" decoding="async"'
+       + ' referrerpolicy="no-referrer" onerror="imgDead(this)"></a>';
+}
+
+function renderGallery(items) {
+  if (!items.length) return '<div class="loading">결과 없음</div>';
+  var h = '<div class="gal">';
+  items.forEach(function (it) {
+    h += '<div class="card">';
+    // 사진이 둘이면 나란히 — 하나가 실내, 하나가 외관인 경우가 많아 같이 봐야 판단이 된다.
+    h += it.img2 ? '<div class="two">' + shot(it.img) + shot(it.img2) + '</div>' : shot(it.img);
+    h += '<div class="cap"><div class="nm">' + esc(it.title || '(이름 없음)') + '</div>';
+    if (it.addr) h += '<div class="ad">' + esc(it.addr) + '</div>';
+    h += '<div class="id"><code>' + esc(it.id) + '</code></div></div></div>';
+  });
+  return h + '</div>';
+}
+
+function loadImages() {
+  var src = document.getElementById('isrc').value;
+  var qs = '?source=' + encodeURIComponent(src || 'barrier_free')
+         + '&region=' + encodeURIComponent(document.getElementById('ireg').value)
+         + '&missing=' + encodeURIComponent(document.getElementById('imiss').value)
+         + '&q=' + encodeURIComponent(document.getElementById('iq').value.trim())
+         + '&limit=' + ILIMIT + '&offset=' + IOFF;
+  document.getElementById('ibody').innerHTML = '<div class="loading">불러오는 중…</div>';
+  api('/images' + qs)
+    .then(function (d) {
+      // 소스·지역 목록은 응답이 함께 준다. 한 번만 채운다 — 매번 채우면 선택이 풀린다.
+      if (!ifilled) {
+        document.getElementById('isrc').innerHTML = d.sources.map(function (o) {
+          return '<option value="' + esc(o.key) + '">' + esc(o.label) + '</option>';
+        }).join('');
+        document.getElementById('ireg').innerHTML = '<option value="">전국</option>'
+          + d.regions.map(function (r) {
+              return '<option value="' + esc(r.code) + '">' + esc(r.label) + '</option>';
+            }).join('');
+        ifilled = true;
+      }
+      document.getElementById('ibody').innerHTML = renderGallery(d.items);
+      document.getElementById('iinfo').textContent = d.total
+        ? fmt(d.total) + '곳 중 ' + (IOFF + 1) + '–' + (IOFF + d.items.length)
+        : '해당하는 곳이 없습니다';
+      document.getElementById('iprev').disabled = IOFF === 0;
+      document.getElementById('inext').disabled = IOFF + d.items.length >= d.total;
+    })
+    .catch(function (e) {
+      document.getElementById('ibody').innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+    });
+}
+
+['isrc', 'ireg', 'imiss'].forEach(function (id) {
+  document.getElementById(id).addEventListener('change', function () { IOFF = 0; loadImages(); });
+});
+// 한 글자마다 쿼리를 던지지 않는다. 엔터로 검색하고, 지웠을 때만 자동으로 되돌린다.
+document.getElementById('iq').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { IOFF = 0; loadImages(); }
+});
+document.getElementById('iq').addEventListener('input', function (e) {
+  if (e.target.value === '') { IOFF = 0; loadImages(); }
+});
+document.getElementById('iprev').addEventListener('click', function () {
+  IOFF = Math.max(0, IOFF - ILIMIT); loadImages();
+});
+document.getElementById('inext').addEventListener('click', function () {
+  IOFF += ILIMIT; loadImages();
+});
 
 // ── 신고 운영(049) ──
 //  이 화면의 핵심은 "무엇이 신고됐는지" 를 그 자리에서 보여주는 것이다. 서버가 본문·작성자를

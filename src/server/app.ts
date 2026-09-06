@@ -9,6 +9,7 @@ import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
 import { privacyPage, termsPage } from './legal-pages';
+import { toHttps } from './image-url';
 import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
 import { buildDashboard } from './dashboard';
@@ -709,13 +710,6 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
    *    두 호스트 모두 https 로 200 을 준다(확인함) — 서버에서 올려 보내면 앱이 처리할 일이 없다.
    *    ⚠️ 다른 호스트까지 무조건 바꾸지는 않는다. https 를 지원하지 않는 곳이면 링크가 깨진다.
    */
-  const HTTPS_SAFE_HOSTS = /^http:\/\/(tong\.visitkorea\.or\.kr|place\.map\.kakao\.com|.*\.daumcdn\.net)\//;
-  const toHttps = (url: unknown): string | null => {
-    if (typeof url !== 'string' || !url.trim()) return null;
-    const u = url.trim();
-    return HTTPS_SAFE_HOSTS.test(u) ? u.replace(/^http:/, 'https:') : u;
-  };
-
   /**
    * HTML 이스케이프 — 서버가 뱉는 페이지에 값을 넣을 때 반드시 거친다.
    *
