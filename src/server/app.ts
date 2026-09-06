@@ -80,7 +80,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/barrier-free/:contentId',
       'GET /v1/barrier-free/:contentId/related?limit=',
       'GET /v1/search?q=&limit=&offset=',
-      'GET /v1/reviews?sort=recommended|likes|latest&contentId=&hasImage=&visitorTag=&mine=&limit=&offset=  (mine 은 🔒)',
+      'GET /v1/reviews?sort=&contentId=&hasImage=&visitorTag=&mine=&liked=&limit=&offset=  (mine·liked 는 🔒)',
       'GET /v1/reviews/summary?contentId=',
       'GET /v1/review-tags',
       '🔒 POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm?, tags?, wouldRevisit?, imageURLs?}',
@@ -992,11 +992,14 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
 
   v1.get('/reviews', async (c) => {
     const { limit, offset } = paging(c);
-    const sort = c.req.query('sort') ?? 'recommended';
+    const sortParam = c.req.query('sort');
+    const sort = sortParam ?? 'recommended';
     // 모르는 sort 는 recommended 로 떨어진다. **정렬 판정에는 이 값을 쓴다** — 아래 가점을
     //  raw sort 로 판단하면 `?sort=garbage` 가 recommended 순서를 받으면서 가점만 안 받는다.
     //  응답의 sort 는 받은 값을 그대로 되돌려 준다(기존 동작 유지).
     const applied = REVIEW_ORDERS[sort] ? sort : 'recommended';
+    // sort 를 **실제로 줬는지**. liked 목록의 기본 정렬을 정할 때 쓴다(아래).
+    const sortGiven = sortParam != null && REVIEW_ORDERS[sortParam] != null;
     let order = REVIEW_ORDERS[applied]!;
     const where: string[] = [];
     // ⚠️ 보는 사람을 **$1 로 앞에 둔다.** 차단 필터가 생기면서 count 도 viewer 가 필요해졌다 —
@@ -1007,18 +1010,24 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     const viewerParam = filters.length;
     where.push(blockFilter('r.author_id', viewerParam));
 
-    // 내가 쓴 후기만 — 설정 → 내 게시글에서 후기와 게시글을 함께 보여 주기 위한 필터.
+    // 내 것을 묻는 필터 — 설정 → 내 게시글(mine) · 저장 탭의 "좋아요한 후기"(liked).
     //
     //  ⚠️ **비로그인이면 401 이다. 빈 목록이 아니다.** 빈 목록으로 주면 "로그인이 안 됐다" 와
     //     "쓴 후기가 없다" 가 화면에서 똑같이 보인다 — 앱은 "내 후기가 없습니다" 를 띄우고,
     //     보는 사람은 자기 글이 사라졌다고 읽는다. 401 은 앱이 무엇을 해야 하는지(로그인)
-    //     알려 주는 유일한 응답이다. /v1/posts?mine 과 같은 동작이다.
-    if (c.req.query('mine') === 'true') {
+    //     알려 주는 유일한 응답이다. /v1/posts 의 mine·liked 와 같은 동작이다.
+    const mine = c.req.query('mine') === 'true';
+    const liked = c.req.query('liked') === 'true';
+    if (mine || liked) {
       if (viewerId == null) {
         return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401);
       }
       // 보는 사람이 $1 이라 새 파라미터가 필요 없다 — count 쿼리와도 자동으로 맞는다.
-      where.push(`r.author_id = $${viewerParam}`);
+      if (mine) where.push(`r.author_id = $${viewerParam}`);
+      if (liked) {
+        where.push(`exists (select 1 from review_likes rl
+                             where rl.review_id = r.id and rl.author_id = $${viewerParam})`);
+      }
     }
 
     const contentId = c.req.query('contentId');
@@ -1057,8 +1066,21 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     //     이 $N 이 등장하지 않는다. filters 에 그냥 push 하면 개수가 어긋나 total 쿼리가
     //     "bind message supplies N parameters, but prepared statement requires M" 으로 죽는다.
     //     (/barrier-free 의 orderParams 와 같은 이유·같은 방식이다.)
+    // 좋아요 목록은 **내가 누른 순서**로 본다 — 후기가 쓰인 시각이 아니라 내가 담은 시각이
+    //  그 목록의 시간축이다(저장 목록이 저장한 순서인 것과 같다).
+    //
+    //  ⚠️ **sort 를 명시하면 그쪽이 이긴다.** liked 가 무조건 이기게 하면 `liked=true&sort=latest`
+    //     의 sort 가 조용히 무시된다 — 준 파라미터가 아무 일도 안 하는 그 동작이 애초에
+    //     liked 를 붙이게 된 이유다. liked 는 **기본 정렬만** 바꾼다.
+    if (liked && !sortGiven) {
+      order = `(select rl.created_at from review_likes rl
+                 where rl.review_id = r.id and rl.author_id = $${viewerParam}) desc, r.created_at desc`;
+    }
+
     const rowParams = [...filters];
-    const myTags = applied === 'recommended' ? visitorTagsOf(c) : [];
+    //  ⚠️ liked 목록에는 가점을 얹지 않는다. latest·likes 를 뺀 것과 같은 이유다 —
+    //     "내가 담은 순서" 앞에 키를 세우면 그 순서가 내 것이 아니게 된다.
+    const myTags = (applied === 'recommended' && !(liked && !sortGiven)) ? visitorTagsOf(c) : [];
     if (myTags.length) {
       rowParams.push(myTags);
       order = `(select count(*) from review_tags rt

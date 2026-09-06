@@ -534,6 +534,7 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 | `hasImage` | `true` | 사진이 있는 후기만 — 화면의 "사진/영상 후기만 보기" |
 | `visitorTag` | `visit_wheelchair` | 방문 조건으로 **걸러내기**(그 조건인 후기만). ↔ 아래 헤더는 **올리기** |
 | `mine` | `true` | 🔒 내가 쓴 후기만 — 설정 → 내 게시글. **비로그인이면 401** |
+| `liked` | `true` | 🔒 내가 좋아요한 후기만 — 저장 탭. **비로그인이면 401** |
 | `limit`/`offset` | | 페이지네이션 |
 
 | 헤더 | 예시 | 설명 |
@@ -603,16 +604,38 @@ curl -sH "Authorization: Bearer $KEY" -H "x-visitor-tags: visit_visual" \
 - `contentId`: 연결된 장소. 자유 방문지면 `null`
 - `isAccessibilityVerified`: ♿ 검증 뱃지. 현재 쓰기 API로는 설정되지 않고 항상 `false`
 
-**`mine=true` — 내가 쓴 후기만**
+**`mine=true` · `liked=true` — 내 것만**
 
-`GET /v1/posts?mine=true`와 같은 규칙입니다. 세션의 계정이 쓴 후기만 오고, `total`도 그 수입니다.
+`GET /v1/posts`의 같은 이름 파라미터와 같은 규칙입니다. 세션의 계정 기준으로 걸러지고, `total`도 그 수입니다.
+
+| | 거르는 기준 | 기본 정렬 |
+|---|---|---|
+| `mine=true` | 내가 **쓴** 후기 | `sort` 그대로(기본 `recommended`) |
+| `liked=true` | 내가 **좋아요한** 후기 | **내가 누른 순서**(최근 누른 것부터) |
+
+둘을 함께 주면 교집합입니다 — 내가 쓰고 내가 좋아요한 후기.
 
 - ⚠️ **비로그인이면 `401 login_required`입니다. 빈 목록이 아닙니다.** 빈 목록으로 주면 "로그인이
   안 됐다"와 "쓴 후기가 없다"가 화면에서 구별되지 않습니다 — 앱은 "후기가 없습니다"를 띄우고,
   보는 사람은 자기 글이 사라졌다고 읽습니다. 401은 앱이 무엇을 해야 하는지 알려 주는 유일한 응답입니다
-- 로그인했는데 쓴 후기가 없으면 `total: 0`에 빈 배열입니다(이건 정상적인 빈 상태)
-- 다른 필터·정렬과 함께 씁니다 — `mine=true&sort=latest`, `mine=true&contentId=...`
-- `mine=true` 외의 값(`false`, `1`)은 필터가 아닙니다
+- 로그인했는데 해당하는 후기가 없으면 `total: 0`에 빈 배열입니다(이건 정상적인 빈 상태)
+- 다른 필터와 함께 씁니다 — `liked=true&contentId=...`, `mine=true&hasImage=true`
+- `true` 외의 값(`false`, `1`)은 필터가 아닙니다
+
+**`liked=true`의 정렬** — 후기가 쓰인 시각이 아니라 **내가 담은 시각**이 그 목록의 시간축입니다
+(저장 목록이 저장한 순서인 것과 같습니다).
+
+```
+GET /v1/reviews?liked=true                  → 내가 누른 순서 (최근 누른 것부터)
+GET /v1/reviews?liked=true&sort=latest      → 최신순  ← sort 를 주면 그쪽이 이깁니다
+```
+
+- ⚠️ **`sort`를 명시하면 그쪽이 이깁니다.** `liked`가 무조건 이기게 하면 준 `sort`가 조용히
+  무시됩니다 — 파라미터가 아무 일도 안 하는 그 동작이 애초에 `liked`를 붙이게 된 이유입니다.
+  `liked`는 **기본 정렬만** 바꿉니다
+- ⚠️ `x-visitor-tags` 가점은 `liked` 목록에 **얹히지 않습니다.** `latest`·`likes`를 뺀 것과 같은
+  이유입니다 — "내가 담은 순서" 앞에 키를 세우면 그 순서가 내 것이 아니게 됩니다.
+  (`liked=true&sort=recommended`처럼 명시하면 적용됩니다)
 
 ### GET /v1/reviews/summary — 장소 단위 전체 평점
 장소 상세 헤더의 "★ 4.3 · 후기 235"용.
