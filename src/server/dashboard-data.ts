@@ -512,6 +512,49 @@ export type PlaceImage = {
 
 export type ImageRegion = { code: string; label: string };
 
+export type ImageSourceOption = { key: string; label: string; n: number };
+
+/**
+ * 고를 수 있는 소스 — **이 DB에 실제로 행이 있는 것만.**
+ *
+ *  ⚠️ 맵에 적힌 다섯 개를 그대로 내보내면 안 된다. 로컬(전체 수집 원본)과 관리형(API용 슬림
+ *     사본)은 테이블 구성이 다르다 — kor_poi 는 로컬 61,635행이지만 프로덕션은 0행이다.
+ *     그대로 두면 프로덕션에서 "국문 관광정보" 는 눌러도 늘 "결과 없음" 인 죽은 항목이 되고,
+ *     보는 사람은 고장으로 읽는다. 이 파일 첫 주석이 경고하는 그 함정이라 같은 규칙을 따른다.
+ *
+ *  ⚠️ 테이블이 **아예 없을 수도** 있다(슬림 사본). to_regclass 로 먼저 거르지 않으면
+ *     count 쿼리가 42P01 로 죽으면서 탭 전체가 에러가 된다.
+ *
+ *  붙는 숫자는 "사진이 있는 행" 수다. 0 이어도 목록에는 남긴다 — 행은 있는데 사진이 없는
+ *  상태이고, 그건 "사진 없는 곳" 으로 봐야 할 대상이지 숨길 것이 아니다.
+ */
+export async function imageSources(): Promise<ImageSourceOption[]> {
+  const entries = Object.entries(IMAGE_SOURCES);
+  const exists = (await readOnlyQuery<{ key: string; ok: boolean }>(
+    `select * from (values ${entries.map((_, i) => `($${i + 1}::text)`).join(', ')}) v(key)
+       cross join lateral (select to_regclass('public.' || quote_ident(v.key)) is not null as ok) x`,
+    entries.map(([k]) => k),
+  )).rows.filter((r) => r.ok).map((r) => r.key);
+
+  if (!exists.length) return [];
+  const counts = (await readOnlyQuery<{ key: string; all: number; n: number }>(
+    exists.map((k) => {
+      const v = IMAGE_SOURCES[k]!;
+      return `select '${k}' as key, count(*)::int as all,
+                     count(*) filter (where ${v.img} is not null and ${v.img} <> '')::int as n
+                from public."${v.table}"`;
+    }).join(' union all '),
+  )).rows;
+
+  // ⚠️ union all 은 순서를 보장하지 않는다. 맵에 적은 순서를 되살린다 — 맨 앞이 기본값이 되고,
+  //    이 앱의 중심 데이터는 무장애 여행지다(정렬을 안 하면 그날그날 다른 것이 기본이 된다).
+  const order = new Map(entries.map(([k], i) => [k, i]));
+  return counts
+    .filter((r) => r.all > 0)
+    .sort((a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99))
+    .map((r) => ({ key: r.key, label: `${IMAGE_SOURCES[r.key]!.label} (${r.n.toLocaleString('ko-KR')})`, n: r.n }));
+}
+
 /**
  * 지역 필터용 시·도 목록.
  *

@@ -386,8 +386,9 @@ function renderGallery(items) {
 }
 
 function loadImages() {
-  var src = document.getElementById('isrc').value;
-  var qs = '?source=' + encodeURIComponent(src || 'barrier_free')
+  // 목록이 아직 없으면 meta=1 로 함께 받는다(탭을 처음 열 때 한 번). 그 뒤로는 안 받는다 —
+  //  페이지를 넘길 때마다 다섯 테이블을 세게 하지 않는다.
+  var qs = (ifilled ? '?source=' + encodeURIComponent(document.getElementById('isrc').value) : '?meta=1')
          + '&region=' + encodeURIComponent(document.getElementById('ireg').value)
          + '&missing=' + encodeURIComponent(document.getElementById('imiss').value)
          + '&q=' + encodeURIComponent(document.getElementById('iq').value.trim())
@@ -396,10 +397,15 @@ function loadImages() {
   api('/images' + qs)
     .then(function (d) {
       // 소스·지역 목록은 응답이 함께 준다. 한 번만 채운다 — 매번 채우면 선택이 풀린다.
-      if (!ifilled) {
-        document.getElementById('isrc').innerHTML = d.sources.map(function (o) {
-          return '<option value="' + esc(o.key) + '">' + esc(o.label) + '</option>';
-        }).join('');
+      if (!ifilled && d.sources) {
+        // 이 DB 에 행이 있는 소스만 온다 — 관리형 사본에는 없는 테이블이 있어서,
+        //  다섯 개를 그대로 그리면 눌러도 늘 비어 있는 항목이 생긴다.
+        document.getElementById('isrc').innerHTML = d.sources.length
+          ? d.sources.map(function (o) {
+              return '<option value="' + esc(o.key) + '"' + (o.key === d.source ? ' selected' : '')
+                   + '>' + esc(o.label) + '</option>';
+            }).join('')
+          : '<option value="">수집 테이블 없음</option>';
         document.getElementById('ireg').innerHTML = '<option value="">전국</option>'
           + d.regions.map(function (r) {
               return '<option value="' + esc(r.code) + '">' + esc(r.label) + '</option>';
