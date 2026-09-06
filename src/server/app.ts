@@ -1,7 +1,7 @@
 // moduwa 관광 데이터 REST API — Hono
 //  조회는 전부 읽기 전용. 예외적으로 리뷰(POST /v1/reviews)만 쓰기를 허용한다.
 import { createHash, randomInt, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -84,6 +84,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/reviews/summary?contentId=',
       'GET /v1/review-tags',
       '🔒 POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm?, tags?, wouldRevisit?, imageURLs?}',
+      '🔒 DELETE /v1/reviews/:reviewId  (본인 것만)',
       '🔒 POST /v1/reviews/:reviewId/comments  {body, authorNm?}',
       '🔒 PATCH · DELETE /v1/reviews/:reviewId/comments/:commentId  (본인 것만)',
       '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?, avoidCrowds?}',
@@ -1379,6 +1380,49 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     return c.json(shapeReview(row), 201);
   });
 
+  /**
+   * 후기 삭제 — **본인 것만.**
+   *
+   *  /privacy 4항이 "이용자 작성물(게시글·후기·댓글·플랜) — 이용자가 삭제할 때까지" 라고
+   *  적어 두었는데 후기에는 지우는 경로가 없었다. 방침과 구현이 어긋난 상태였다.
+   *
+   *  ⚠️ **댓글·좋아요·태그는 FK 가 cascade 로 함께 지운다**(019·020). 카운터는 후기 행에
+   *     들어 있으므로 따로 줄일 것이 없다. 신고(reports)는 FK 가 없어 남는데, 그건 의도된
+   *     것이다 — 운영 화면이 "대상이 지워져 내용을 볼 수 없습니다" 로 표시한다.
+   *
+   *  ⚠️ **사진은 참조를 세고 지운다.** 파일 이름이 내용의 sha256 이라(업로드 주석 참고)
+   *     서로 다른 사람이 같은 사진을 올리면 **한 파일을 공유한다.** 그냥 지우면 남의 사진이
+   *     사라진다. 그래서 아무 데서도 안 쓰는 파일만 지우고, 조금이라도 의심스러우면 남긴다.
+   */
+  v1.delete('/reviews/:reviewId', async (c) => {
+    const gate = requireAuth(c);
+    if (gate instanceof Response) return gate;
+    const authorId = gate.authorId;
+    // 계정이 아직 없는 세션은 쓴 후기도 없다 — 존재를 알려 주지 않도록 404 로 맞춘다.
+    if (authorId == null) return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404);
+
+    // reviews.id 는 bigserial 이다. 문자열로 넘긴다 — Number 로 바꾸면 큰 id 가 조용히
+    //  어긋나고, 지우는 요청에서 그건 **다른 행을 지우는** 결과가 된다(setReviewLike 와 같은 방식).
+    const reviewId = c.req.param('reviewId') ?? '';
+    if (!/^\d+$/.test(reviewId)) {
+      return c.json({ error: 'invalid_reviewId', message: 'reviewId 는 숫자여야 합니다.' }, 400);
+    }
+
+    // author_id 조건이 소유 검사를 겸한다 — 남의 후기는 rowCount 0 이라 404 가 된다.
+    //  ⚠️ 남의 것을 지우려 했을 때 403 이 아니라 404 인 이유: 403 은 "그 후기가 있다" 를
+    //     알려 준다. 있는지 없는지도 남의 일이다(게시글 삭제와 같은 판단).
+    const gone = await query<{ image_urls: string[] | null }>(
+      'delete from reviews where id = $1 and author_id = $2 returning image_urls',
+      [reviewId, authorId],
+    );
+    if (gone.rowCount === 0) return c.json({ error: 'not_found', message: '후기를 찾을 수 없습니다.' }, 404);
+
+    // 사진 정리는 **응답을 막지 않는다.** 파일 하나 못 지운 것이 삭제 실패로 보이면 안 된다 —
+    //  행은 이미 지워졌고, 사용자에게 후기는 사라진 것이 맞다.
+    await removeUnreferencedImages(gone.rows[0]?.image_urls ?? []).catch(() => {});
+    return c.body(null, 204);
+  });
+
   // ── 리뷰 댓글(020) ──────────────────────────────────────────────────────────
   //  작성자 식별은 리뷰와 같다(기기 UUID + 닉네임 → authors 대리키). device_id 는 내보내지 않는다.
   const MAX_COMMENT_LEN = 1000;
@@ -1416,6 +1460,36 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   };
 
   /** 경로의 reviewId 를 정수로. 형식이 틀리면 null (404 로 응답한다). */
+  /**
+   * 후기에서 떨어져 나온 사진 중 **아무 데서도 안 쓰는 것만** 파일에서 지운다.
+   *
+   *  ⚠️ 파일 이름이 내용의 sha256 이라 같은 사진은 한 파일을 공유한다. 다른 사람이 같은
+   *     사진을 올렸거나, 같은 사람이 게시글·프로필에도 썼을 수 있다. 하나라도 걸리면 남긴다.
+   *
+   *  ⚠️ **URL 전체가 아니라 파일 이름으로 맞춘다.** 저장된 URL 에는 그때의 origin 이 들어
+   *     있어(localhost / 도메인 / 도메인 변경 전후) 문자열이 서로 다를 수 있다. 같은 파일을
+   *     가리키는데 다르게 적힌 URL 을 놓치면, 살아 있는 사진을 지우게 된다.
+   *
+   *  ⚠️ 이름 형식을 다시 확인한다 — 여기 들어오는 값은 DB 에 저장된 문자열이고, 그게 곧
+   *     파일 경로가 된다. 형식이 아닌 것은 우리 파일이 아니므로 건드리지 않는다.
+   */
+  const removeUnreferencedImages = async (urls: string[]): Promise<void> => {
+    for (const url of urls) {
+      const name = url.split('/').pop() ?? '';
+      if (!/^[0-9a-f]{64}\.(jpg|png|heic)$/.test(name)) continue; // 우리가 저장한 파일이 아니다
+      const like = `%/images/reviews/${name}`;
+      const used = (await query<{ used: boolean }>(
+        `select exists (
+           select 1 from reviews r, unnest(r.image_urls) u where u like $1
+           union all select 1 from posts p, unnest(p.image_urls) u where u like $1
+           union all select 1 from authors where avatar_url like $1
+           union all select 1 from plans where cover_image_url like $1
+           union all select 1 from plan_items where image_url like $1
+         ) as used`, [like])).rows[0]?.used;
+      if (used === false) await unlink(imagePathFor(name)).catch(() => {});
+    }
+  };
+
   const parseReviewId = (raw: string): number | null => {
     const n = Number(raw);
     return Number.isInteger(n) && n > 0 ? n : null;
