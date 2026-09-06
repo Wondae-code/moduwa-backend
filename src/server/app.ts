@@ -8,7 +8,7 @@ import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
-import { privacyPage, termsPage } from './legal-pages';
+import { privacyPage, supportPage, termsPage } from './legal-pages';
 import { toHttps } from './image-url';
 import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
@@ -332,6 +332,9 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   //  앱스토어가 로그인 없이 접근되는 공개 URL 을 요구한다(legal-pages.ts 상단).
   app.get('/privacy', (c) => c.html(privacyPage()));
   app.get('/terms', (c) => c.html(termsPage()));
+  //  App Store Connect 의 Support URL 이 가리킨다. 루트(/)는 API JSON 이라 쓸 수 없다 —
+  //  심사자가 JSON 을 보면 메타데이터 리젝이다.
+  app.get('/support', (c) => c.html(supportPage()));
 
   app.get('/health', async (c) => {
     try {

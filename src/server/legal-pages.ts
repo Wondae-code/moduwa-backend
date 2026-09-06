@@ -69,14 +69,19 @@ const STYLE = `
   footer{margin-top:44px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
 `;
 
-const shell = (title: string, body: string) =>
+/**
+ * @param sub 제목 아래 한 줄. 방침·약관은 시행일, 지원 페이지는 한 줄 소개가 온다.
+ *   ⚠️ 지원 페이지에 "시행일" 을 달지 않는다 — 그건 법적 문서의 표시이고, 문의 안내에
+ *      붙으면 이 페이지도 동의 대상 문서처럼 읽힌다.
+ */
+const shell = (title: string, body: string, sub = `시행일 ${OPERATOR.effective}`) =>
   `<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${OPERATOR.service} — ${title}</title>
 <style>${STYLE}</style></head><body><div class="wrap">
 <div class="brand">${OPERATOR.service}</div>
 <h1>${title}</h1>
-<p class="eff">시행일 ${OPERATOR.effective}</p>
+<p class="eff">${sub}</p>
 ${body}
 <footer>${OPERATOR.service} · 문의 <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a><br>
 <a href="/privacy">개인정보 처리방침</a> · <a href="/terms">이용약관</a></footer>
@@ -318,3 +323,53 @@ export const termsPage = () => shell('이용약관', `
 문의: <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a></p>
 </div>
 `);
+
+/**
+ * 지원 페이지(/support) — App Store Connect 의 **Support URL** 이 가리킬 곳.
+ *
+ * ⚠️ 이 항목은 **필수**이고, 루트(`/`)는 API JSON 이라 쓸 수 없다. 심사자가 JSON 을 보면
+ *    메타데이터 리젝이다. 로그인 없이 열려야 한다는 조건도 /privacy·/terms 와 같다.
+ *
+ * ⚠️ **help@moduwa.app 이 실제로 받을 수 있어야 한다.** 심사자가 여기로 메일을 보내고
+ *    답이 없으면 그 자체가 지적 사유가 된다. 2026-09-07 확인: moduwa.app 의 MX 가
+ *    Porkbun 포워딩(fwd1·fwd2)으로 살아 있고 SPF 도 걸려 있다. 주소를 바꾸거나 DNS 를
+ *    옮길 때 이 페이지의 주소도 함께 본다.
+ *
+ * ⚠️ **계정 삭제 안내를 넣는다.** 심사 지침 5.1.1(v) 는 계정을 만들 수 있는 앱이면 지우는
+ *    방법도 찾을 수 있어야 한다고 본다. 앱 안에 경로가 있지만(설정 → 계정 삭제) 지원
+ *    페이지에서도 한 번 더 말해 두는 편이 심사자에게 확인시키기 쉽다.
+ */
+export const supportPage = () => shell('고객 지원', `
+<p><b>${OPERATOR.service}</b>는 휠체어·시각·청각·유아 동반·고령자 등 저마다의 조건에 맞는
+무장애 여행지를 찾고, 같은 조건으로 다녀온 사람의 후기를 볼 수 있는 앱입니다.</p>
+
+<h2>문의하기</h2>
+<div class="box">
+<p>궁금한 점, 오류 제보, 장소 정보 정정 요청을 아래 주소로 보내주세요.</p>
+<p style="margin-bottom:0"><b><a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a></b></p>
+</div>
+<p>영업일 기준 3일 안에 답변드리는 것을 목표로 합니다. 오류 제보 시 사용 기기와 앱 버전을
+함께 적어 주시면 원인을 찾는 데 큰 도움이 됩니다.</p>
+<p>개인정보 열람·정정·삭제 등 개인정보에 관한 요청은
+<a href="mailto:${OPERATOR.privacyContact}">${OPERATOR.privacyContact}</a>로 보내주셔도 됩니다.</p>
+
+<h2>자주 찾는 것</h2>
+<h3>계정을 삭제하고 싶어요</h3>
+<p>앱의 <b>설정 → 계정 삭제</b>에서 직접 삭제하실 수 있습니다. 삭제하면 이메일·닉네임·프로필
+사진과 접근성 특성이 즉시 지워지고, 소셜 로그인 연동도 해제됩니다. 이미 올리신 게시글·후기는
+작성자 표시를 지운 상태로 남습니다 — 자세한 내용은
+<a href="/privacy">개인정보 처리방침</a> 5항에 있습니다.</p>
+<h3>내가 쓴 글·후기를 지우고 싶어요</h3>
+<p>글이나 후기의 <b>⋮ 메뉴 → 삭제</b>에서 언제든 지우실 수 있습니다.</p>
+<h3>불쾌한 글이나 이용자를 봤어요</h3>
+<p>해당 글의 <b>⋮ 메뉴</b>에서 신고하거나 그 이용자를 차단하실 수 있습니다. 차단하면 그 사람의
+글과 댓글이 더 이상 보이지 않습니다. 급한 건은
+<a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a>로도 알려주세요.</p>
+<h3>장소 정보가 실제와 달라요</h3>
+<p>무장애 시설 정보는 한국관광공사 공공데이터를 바탕으로 합니다. 실제와 다른 점을 발견하시면
+장소 이름과 함께 알려주세요. 확인 후 바로잡겠습니다.</p>
+
+<h2>운영자</h2>
+<p>${OPERATOR.service} · ${who}<br>
+문의: <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a></p>
+`, '무장애 여행을 위한 안내와 문의');
