@@ -80,7 +80,7 @@ export function buildApp(): Hono<AppEnv> {
       'GET /v1/barrier-free/:contentId',
       'GET /v1/barrier-free/:contentId/related?limit=',
       'GET /v1/search?q=&limit=&offset=',
-      'GET /v1/reviews?sort=recommended|likes|latest&contentId=&hasImage=&limit=&offset=',
+      'GET /v1/reviews?sort=recommended|likes|latest&contentId=&hasImage=&visitorTag=&mine=&limit=&offset=  (mine 은 🔒)',
       'GET /v1/reviews/summary?contentId=',
       'GET /v1/review-tags',
       '🔒 POST /v1/reviews  {contentId?, locationNm, rating, body, authorNm?, tags?, wouldRevisit?, imageURLs?}',
@@ -1002,9 +1002,25 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     // ⚠️ 보는 사람을 **$1 로 앞에 둔다.** 차단 필터가 생기면서 count 도 viewer 가 필요해졌다 —
     //  예전처럼 SELECT 에만 주면 total 은 차단한 사람의 후기를 세고 items 는 빼서, 페이지마다
     //  개수가 어긋나고 마지막 페이지가 비어 보인다.
-    const filters: unknown[] = [authorOf(c)];
+    const viewerId = authorOf(c);
+    const filters: unknown[] = [viewerId];
     const viewerParam = filters.length;
     where.push(blockFilter('r.author_id', viewerParam));
+
+    // 내가 쓴 후기만 — 설정 → 내 게시글에서 후기와 게시글을 함께 보여 주기 위한 필터.
+    //
+    //  ⚠️ **비로그인이면 401 이다. 빈 목록이 아니다.** 빈 목록으로 주면 "로그인이 안 됐다" 와
+    //     "쓴 후기가 없다" 가 화면에서 똑같이 보인다 — 앱은 "내 후기가 없습니다" 를 띄우고,
+    //     보는 사람은 자기 글이 사라졌다고 읽는다. 401 은 앱이 무엇을 해야 하는지(로그인)
+    //     알려 주는 유일한 응답이다. /v1/posts?mine 과 같은 동작이다.
+    if (c.req.query('mine') === 'true') {
+      if (viewerId == null) {
+        return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401);
+      }
+      // 보는 사람이 $1 이라 새 파라미터가 필요 없다 — count 쿼리와도 자동으로 맞는다.
+      where.push(`r.author_id = $${viewerParam}`);
+    }
+
     const contentId = c.req.query('contentId');
     if (contentId) { filters.push(contentId); where.push(`r.content_id = $${filters.length}`); }
     // 시안의 "사진/영상 후기만 보기". image_urls 가 null 인 행도 있어 coalesce 로 감싼다.
@@ -2558,6 +2574,10 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     //  목록 자체는 공개다 — 둘러보기는 로그인 없이 되어야 한다(앱스토어 심사 고려 포함).
     const viewerId = authorOf(c)
     // 내 것을 묻는 필터(mine·liked)는 사람이 있어야 성립한다.
+    //  ⚠️ **빈 목록으로 바꾸지 말 것.** 그러면 "로그인이 안 됐다" 와 "쓴 글이 없다" 가 화면에서
+    //     구별되지 않는다 — 앱은 "글이 없습니다" 를 띄우고 보는 사람은 자기 글이 사라졌다고
+    //     읽는다. (여기 아래에 빈 목록을 주는 줄이 하나 더 있었는데, 이 401 때문에 한 번도
+    //     실행된 적이 없는 죽은 코드였다. 읽는 사람에게 반대 동작을 약속하고 있어 지웠다.)
     if ((mine || liked) && viewerId == null) {
       return c.json({ error: 'login_required', message: '로그인이 필요합니다.' }, 401)
     }
@@ -2566,9 +2586,6 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     const params: unknown[] = [viewerId]
     // 차단한 사람의 글은 홈·저장·장소별 어디에서도 보이지 않는다(048).
     conditions.push(blockFilter('p.author_id', 1))
-    // 내 것을 묻는 필터는 사람이 있어야 성립한다. 아직 아무것도 쓴 적 없는 기기라
-    // authors 행이 없으면 결과는 빈 목록이 맞다 — 전체 목록을 주면 안 된다.
-    if ((mine || liked) && viewerId == null) return c.json({ count: 0, limit, offset, items: [] })
     if (mine) conditions.push(`p.author_id = $1`)
     if (liked) {
       conditions.push(`exists (select 1 from post_likes pl where pl.post_id = p.id and pl.author_id = $1)`)
