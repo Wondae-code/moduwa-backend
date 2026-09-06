@@ -901,7 +901,7 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   //  author_review_count 는 작성자별 총 리뷰 수(레벨 파생용). author_id 가 없으면 0.
   // 보는 사람 파라미터 번호를 받는다(게시글 postSelect 와 같은 방식). count 쿼리는 이 SELECT 를
   //  쓰지 않아 viewer 가 필요 없으므로, 번호를 고정($1)하지 않고 호출부가 정하게 한다.
-  const reviewSelect = (viewer: number) => `
+  const reviewSelect = (viewer: number, extra = '') => `
     select r.id, r.content_id as "contentId", r.location_nm as location,
            r.author_nm as author, r.body, r.rating,
            r.like_count as "likeCount", r.comment_count as "commentCount",
@@ -927,6 +927,7 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
                    ) order by d.sort_order), '[]'::json)
               from review_tags rt join review_tag_defs d on d.code = rt.tag_code
              where rt.review_id = r.id) as tags
+           ${extra ? `, ${extra}` : ''}
       from reviews r
       left join authors a on a.id = r.author_id`;
 
@@ -965,6 +966,20 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   //  정렬: recommended(기본, 좋아요+댓글) / likes(좋아요만 — 시안의 "좋아요 순") / latest.
   //   ⚠️ likes 와 recommended 를 같은 것으로 취급하지 말 것. 시안이 요구하는 건 좋아요 순이고
   //      recommended 는 댓글까지 더한 값이라 순서가 다르게 나온다.
+  /**
+   * 좋아요를 **내가 누른 시각**. liked=true 목록에만 싣는다.
+   *
+   *  ⚠️ 이 값이 있어야 앱이 게시글 목록과 후기 목록을 **한 줄로 합칠 수 있다.** 각 목록은
+   *     서버가 누른 순서로 주지만, 둘을 하나로 세울 기준은 응답에 그 시각이 있어야 생긴다.
+   *     createdAt(글 쓴 시각)으로 섞으면 옛 글에 어제 누른 하트가 맨 아래로 간다.
+   *
+   *  ⚠️ **정렬 키와 같은 값을 읽는다.** 여기와 order by 가 다른 것을 읽으면 앱이 다시 세운
+   *     결과가 서버 순서와 어긋난다 — 한 화면 안에서 순서가 흔들리고 원인을 찾기 어렵다.
+   */
+  const likedAtCol = (table: string, fkCol: string, idCol: string, viewerParam: number) =>
+    `(select to_char(l.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        from ${table} l where l.${fkCol} = ${idCol} and l.author_id = $${viewerParam}) as "likedAt"`;
+
   const REVIEW_ORDERS: Record<string, string> = {
     latest: 'r.created_at desc',
     likes: 'r.like_count desc, r.created_at desc',
@@ -1092,7 +1107,8 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     const total = (await query<{ n: number }>(
       `select count(*)::int n from reviews r ${wsql}`, filters)).rows[0]!.n;
     const rows = (await query<ReviewRow>(
-      `${reviewSelect(viewerParam)} ${wsql} order by ${order} limit ${limit} offset ${offset}`,
+      `${reviewSelect(viewerParam, liked ? likedAtCol('review_likes', 'review_id', 'r.id', viewerParam) : '')}
+       ${wsql} order by ${order} limit ${limit} offset ${offset}`,
       rowParams, // ← filters 가 아니다(위 ⚠️ 참고)
     )).rows;
     return c.json({ total, limit, offset, sort, count: rows.length, items: rows.map(shapeReview) });
@@ -2524,6 +2540,7 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
            coalesce(p.author_id = $VIEWER, false) as "isMine",
            to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "createdAt",
            to_char(p.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "updatedAt"
+           $EXTRA
       from posts p
       join authors a on a.id = p.author_id`
 
@@ -2533,8 +2550,15 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
    * ⚠️ **replaceAll 이어야 한다.** $VIEWER 는 한 번이 아니다(likedByMe · isMine). replace 로
    *    두면 뒤쪽이 그대로 남아 Postgres 가 "$VIEWER" 를 문법 오류로 거절한다.
    */
-  const postSelect = (viewerParam: number) =>
+  /**
+   * @param extra 목록에서만 뜻이 있는 컬럼(예: likedAt). 앞의 `,` 는 여기서 붙인다.
+   *
+   *  ⚠️ 늘 싣지 않고 필요한 목록에만 싣는다. "좋아요 누른 시각" 이 전체 목록에도 들어 있으면
+   *     받는 쪽은 그게 뭔지 묻게 되고, null 이 무슨 뜻인지도 갈린다(안 눌렀다? 목록이 다른가?).
+   */
+  const postSelect = (viewerParam: number, extra = '') =>
     POST_SELECT.replaceAll('$VIEWER', `$${viewerParam}`)
+      .replace('$EXTRA', extra ? `, ${extra}` : '')
 
   /**
    * 게시글 한 건에 작성자 프로필을 덧붙인다(042).
@@ -2629,7 +2653,8 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
       : `p.created_at desc`
 
     const rows = (await query<Record<string, unknown>>(
-      `${postSelect(1)} ${where} order by ${order} limit ${limit} offset ${offset}`, params,
+      `${postSelect(1, liked ? likedAtCol('post_likes', 'post_id', 'p.id', 1) : '')}
+       ${where} order by ${order} limit ${limit} offset ${offset}`, params,
     )).rows
     const places = await loadPostPlaces(rows.map((r) => r.id as string))
     const items = rows.map((r) => ({ ...shapePost(r), places: places.get(r.id as string) ?? [] }))
