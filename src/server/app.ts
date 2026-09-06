@@ -59,7 +59,9 @@ export function buildApp(): Hono<AppEnv> {
     origin: origins.includes('*') || origins.length === 0 ? '*' : origins,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // 쓰기: 후기(POST) · 플랜(PUT/DELETE)
     // x-session-token: 사용자 로그인 세션. authorization 은 이미 API 키가 쓰고 있어 겹칠 수 없다.
-    allowHeaders: ['authorization', 'x-api-key', 'x-session-token', 'content-type'],
+    //  ⚠️ x-visitor-tags 를 빼면 브라우저 클라이언트는 **프리플라이트에서** 막힌다(앱은 안 막혀서
+    //     로컬에서는 통과하고 웹에서만 조용히 깨진다). 요청 헤더를 늘릴 때 여기도 같이 늘린다.
+    allowHeaders: ['authorization', 'x-api-key', 'x-session-token', 'content-type', 'x-visitor-tags'],
   }));
 
   // 공개 엔드포인트 (인증 불필요)
@@ -510,8 +512,14 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     //  ⚠️ 데이터가 얇은 그룹이 있다. 청각은 전국 107곳뿐이라(관광지 27·맛집 22·숙소 23·축제 0)
     //     이 필터를 걸면 목록이 빠르게 바닥난다. 채워 넣지 않는다 — 없는 것을 있는 것처럼
     //     보여 주면 무장애 앱에서는 그게 가장 나쁜 거짓말이다.
-    const accessGroups = (c.req.query('access') ?? '')
-      .split(',').map((v) => v.trim()).filter((name) => ACCESS_GROUP_COLUMNS[name]);
+    //  ⚠️ 이 값도 민감정보다. **x-visitor-tags 헤더로도 받는다** — 축 이름은 후기 태그와 다르니
+    //     visit_ 접두어를 떼고 본다(휠체어 축이 여기서는 wheelchair, 후기에서는
+    //     visit_wheelchair 다). 앱이 헤더로 옮기면 URL 에서 사라진다.
+    //     쿼리스트링도 계속 받는다 — 심사 중인 빌드가 쓰고 있어 끊으면 홈이 빈다.
+    const accessGroups = (visitorTagsOf(c).length
+      ? visitorTagsOf(c).map((v) => v.replace(/^visit_/, ''))
+      : (c.req.query('access') ?? '').split(',').map((v) => v.trim())
+    ).filter((name) => ACCESS_GROUP_COLUMNS[name]);
     for (const name of accessGroups) where.push(ACCESS_GROUP_COLUMNS[name]!);
 
     // 정렬. 구 기본값(has_image desc, has_access desc, contentid)은 앱이 hasImage/hasAccess 를
@@ -887,9 +895,11 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
            (select count(*)::int from reviews r2 where r2.author_id = r.author_id) as author_review_count,
            -- 후기 뱃지용 태그(019). 시안은 뱃지에 짧은 이름을 쓰지만 긴 이름도 함께 보내
            -- 클라이언트가 상황에 맞게 고르게 한다. 태그가 없으면 빈 배열.
+           -- kind 를 함께 싣는다(051). 없으면 앱이 code 의 visit_ 접두어로 종류를 되짚어야 하고,
+           -- 접두어는 규칙이 아니라 우연이라 다음 화면이 같은 함정에 빠진다.
            (select coalesce(json_agg(json_build_object(
                      'code', d.code, 'label', d.label,
-                     'shortLabel', d.short_label, 'icon', d.icon
+                     'shortLabel', d.short_label, 'icon', d.icon, 'kind', d.kind
                    ) order by d.sort_order), '[]'::json)
               from review_tags rt join review_tag_defs d on d.code = rt.tag_code
              where rt.review_id = r.id) as tags
@@ -937,10 +947,33 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     recommended: '(r.like_count + r.comment_count) desc, r.created_at desc',
   };
 
+  /**
+   * 보는 사람이 밝힌 접근성 축 — **쿼리스트링이 아니라 헤더로 받는다.**
+   *
+   *  값이 민감정보이기 때문이다. 서버 접속 로그에는 실측 결과 남지 않지만(2026-09-06 확인:
+   *  우리 코드에 요청 로거가 없고 Railway HTTP 로그의 path 는 `?` 뒤를 버린다 —
+   *  `/v1/reviews?probe=...` 를 보내 `path: "/v1/reviews"` 만 기록되는 것을 확인했다),
+   *  URL 은 로그 말고도 새는 곳이 많다. 이슈에 붙는 curl 한 줄, 화면 캡처, 채팅에 붙여넣는
+   *  재현 절차 — 전부 사람 손으로 옮겨진다. 헤더는 그 경로를 타지 않는다.
+   *
+   *  로거를 켜거나 에러 추적 SDK 를 붙이는 날 조용히 새기 시작하는 것도 막아 준다.
+   *  ⚠️ 헤더를 늘렸으면 CORS allowHeaders 도 늘려야 한다(위 참고).
+   *
+   *  최대 5개. 모르는 코드는 400 이 아니라 그냥 0점 — 앱이 서버보다 먼저 축을 늘릴 수 있고,
+   *  그때 400 을 주면 홈 화면 전체가 빈다(access 필터와 같은 규칙).
+   */
+  const visitorTagsOf = (c: Context<AppEnv>): string[] =>
+    (c.req.header('x-visitor-tags') ?? '')
+      .split(',').map((v) => v.trim()).filter(Boolean).slice(0, 5);
+
   v1.get('/reviews', async (c) => {
     const { limit, offset } = paging(c);
     const sort = c.req.query('sort') ?? 'recommended';
-    const order = REVIEW_ORDERS[sort] ?? REVIEW_ORDERS.recommended;
+    // 모르는 sort 는 recommended 로 떨어진다. **정렬 판정에는 이 값을 쓴다** — 아래 가점을
+    //  raw sort 로 판단하면 `?sort=garbage` 가 recommended 순서를 받으면서 가점만 안 받는다.
+    //  응답의 sort 는 받은 값을 그대로 되돌려 준다(기존 동작 유지).
+    const applied = REVIEW_ORDERS[sort] ? sort : 'recommended';
+    let order = REVIEW_ORDERS[applied]!;
     const where: string[] = [];
     // ⚠️ 보는 사람을 **$1 로 앞에 둔다.** 차단 필터가 생기면서 count 도 viewer 가 필요해졌다 —
     //  예전처럼 SELECT 에만 주면 total 은 차단한 사람의 후기를 세고 items 는 빼서, 페이지마다
@@ -967,10 +1000,38 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     }
     const wsql = where.length ? `where ${where.join(' and ')}` : '';
 
+    // 보는 사람의 방문 조건과 **겹치는 태그 수**를 1순위 키로 올린다.
+    //
+    //  왜 필요한가: 접근성이 주제인 앱에서 "추천"이 반응 수 순이면 나와 상관없는 조건의 후기가
+    //  위에 선다. 앱도 같은 식으로 다시 세우지만 **받아 온 페이지 안에서만** 가능하다 —
+    //  limit=5 인 홈에서는 반응 0 인 딱 맞는 후기가 2페이지에 있어 손에 들어오지도 않는다.
+    //  자르는 쪽이 서버라 서버가 세워야 한다.
+    //
+    //  ⚠️ **recommended 에만 적용한다.** latest 가 최신이 아니면 거짓말인데, likes 도 똑같다 —
+    //     시안의 "좋아요 순" 칩은 사용자가 직접 고른 순서다. 사용자가 고르지 않은 기본값
+    //     (recommended)만 우리가 손댈 수 있다.
+    //  ⚠️ d.kind = 'visitor' 잠금을 지우지 말 것. place 코드(barrier_free 등)로 가점을 받게 되면
+    //     "그 장소가 무장애다" 와 "쓴 사람이 휠체어를 쓴다" 가 한 점수에 섞인다. 앱이 원하는 건
+    //     뒤쪽이다. 게다가 barrier_free 는 절반 넘는 후기에 붙어 있어 순서를 바꾸지도 못한다.
+    //  ⚠️ 파라미터 배열을 **따로 뜬다.** 바로 위 count(*) 가 같은 wsql·filters 를 쓰는데 거기엔
+    //     이 $N 이 등장하지 않는다. filters 에 그냥 push 하면 개수가 어긋나 total 쿼리가
+    //     "bind message supplies N parameters, but prepared statement requires M" 으로 죽는다.
+    //     (/barrier-free 의 orderParams 와 같은 이유·같은 방식이다.)
+    const rowParams = [...filters];
+    const myTags = applied === 'recommended' ? visitorTagsOf(c) : [];
+    if (myTags.length) {
+      rowParams.push(myTags);
+      order = `(select count(*) from review_tags rt
+                  join review_tag_defs d on d.code = rt.tag_code
+                 where rt.review_id = r.id and d.kind = 'visitor'
+                   and rt.tag_code = any($${rowParams.length}::text[])) desc, ${order}`;
+    }
+
     const total = (await query<{ n: number }>(
       `select count(*)::int n from reviews r ${wsql}`, filters)).rows[0]!.n;
     const rows = (await query<ReviewRow>(
-      `${reviewSelect(viewerParam)} ${wsql} order by ${order} limit ${limit} offset ${offset}`, filters,
+      `${reviewSelect(viewerParam)} ${wsql} order by ${order} limit ${limit} offset ${offset}`,
+      rowParams, // ← filters 가 아니다(위 ⚠️ 참고)
     )).rows;
     return c.json({ total, limit, offset, sort, count: rows.length, items: rows.map(shapeReview) });
   });

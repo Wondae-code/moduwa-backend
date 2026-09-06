@@ -365,6 +365,10 @@ GET /v1/pet-friendly/1019041
 
 **접근성 그룹 필터** — `access=wheelchair,visual,hearing,infant,elderly` (콤마 구분).
 
+`x-visitor-tags` 헤더로도 받습니다(`visit_wheelchair,visit_visual` — 후기 태그와 같은 어휘로
+보내면 접두어를 떼고 봅니다). 값이 민감정보라 URL 을 타지 않는 쪽을 권합니다. `access=` 는
+계속 동작하니 앱은 편할 때 옮기면 됩니다.
+
 **AND 다.** 휠체어도 필요하고 유아 동반도 하는 사람에게 둘 중 하나만 되는 곳은 갈 수 있는
 곳이 아니다. OR 로 두면 휠체어(9,270곳)가 결과를 삼켜 필터가 무의미해진다.
 
@@ -528,9 +532,41 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 | `sort` | `likes` | `recommended`(기본, 좋아요+댓글 순) / **`likes`(좋아요만)** / `latest`(최신순) |
 | `contentId` | `2465063` | 특정 장소의 리뷰만. 없으면 전역 목록 |
 | `hasImage` | `true` | 사진이 있는 후기만 — 화면의 "사진/영상 후기만 보기" |
+| `visitorTag` | `visit_wheelchair` | 방문 조건으로 **걸러내기**(그 조건인 후기만). ↔ 아래 헤더는 **올리기** |
 | `limit`/`offset` | | 페이지네이션 |
 
+| 헤더 | 예시 | 설명 |
+|---|---|---|
+| `x-visitor-tags` | `visit_visual,visit_hearing` | 보는 사람의 방문 조건. **`sort=recommended` 의 1순위 정렬 키**가 된다 |
+
 > `likes`와 `recommended`를 같은 것으로 취급하지 말 것. 화면의 "좋아요 순"은 `likes`다. `recommended`는 댓글 수까지 더해 정렬하므로 순서가 다르게 나온다.
+
+**`x-visitor-tags` — 나와 같은 조건의 후기를 위로**
+
+접근성이 주제인 앱에서 "추천"이 반응 수 순이면 나와 상관없는 조건의 후기가 위에 섭니다.
+이 헤더를 주면 **겹치는 방문 조건 태그 수**가 첫 번째 정렬 키가 됩니다:
+
+```
+① 내 방문 조건과 겹치는 태그 수  →  ② 좋아요 + 댓글  →  ③ 최신
+```
+
+```bash
+# 반응 0 인 후기라도 조건이 맞으면 1위로 온다
+curl -sH "Authorization: Bearer $KEY" -H "x-visitor-tags: visit_visual" \
+  "$BASE/v1/reviews?sort=recommended&limit=5"
+```
+
+- **`recommended` 에만 적용됩니다.** `latest`·`likes` 에는 영향이 없습니다 — 사용자가 직접 고른
+  순서를 우리가 뒤집으면 그 라벨이 거짓말이 됩니다. 기본값만 손댑니다
+- **쿼리스트링이 아니라 헤더입니다.** 값이 민감정보이기 때문입니다. 접속 로그에는 남지 않지만
+  (2026-09-06 실측: 우리 코드에 요청 로거가 없고 Railway HTTP 로그의 `path` 는 `?` 뒤를 버립니다),
+  URL 은 이슈에 붙는 curl 한 줄·화면 캡처·재현 절차를 타고 사람 손으로 옮겨집니다
+- **`visitor` 종류만 셉니다.** `place` 코드(`barrier_free` 등)를 넣어도 0점입니다 — "그 장소가
+  무장애다"와 "쓴 사람이 휠체어를 쓴다"는 다른 것이고, 앱이 원하는 건 뒤쪽입니다
+- 모르는 코드는 **400 이 아니라 0점**입니다(`access` 필터와 같은 규칙). 같은 코드를 중복해 보내도
+  이중 계산되지 않습니다
+- **최대 5개까지만 읽습니다.** 6개째부터는 잘리니 축은 다섯 개를 넘기지 마세요
+- `total` 은 정렬과 무관하므로 헤더 유무로 달라지지 않습니다
 
 응답:
 ```json
@@ -550,8 +586,8 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
     "createdAt": "2026-07-11T11:13:12Z",
     "authorInfo": { "nickname": "도현", "reviewCount": 1, "level": 2 },
     "tags": [
-      { "code": "barrier_free", "label": "무장애 친화적이에요", "shortLabel": "무장애", "icon": "access_wheelchair" },
-      { "code": "kids", "label": "아이와 함께하기 좋아요", "shortLabel": "키즈", "icon": "access_child" }
+      { "code": "barrier_free", "label": "무장애 친화적이에요", "shortLabel": "무장애", "icon": "access_wheelchair", "kind": "place" },
+      { "code": "visit_wheelchair", "label": "휠체어로 방문했어요", "shortLabel": "휠체어 방문", "icon": "access_wheelchair", "kind": "visitor" }
     ]
   }]
 }
@@ -559,6 +595,7 @@ TourAPI에 없는 자체 데이터. 홈 피드 '여행자 리뷰' 섹션과 장�
 - `rating`: 별점 1~5. **`null` 가능** — 별점 이전에 작성된 리뷰(텍스트 전용)
 - `wouldRevisit`: 재방문 의향. **`true`/`false`/`null`(미응답) 세 상태다.** 유저가 직접 고른 값만 들어가며 **별점에서 파생하지 않는다** — 별점이 높아도 멀거나 비싸서 안 갈 수 있고 그 반대도 가능하다
 - `tags`: 후기 뱃지용. 뱃지에는 `shortLabel`("무장애"), 칩·집계에는 `label`("무장애 친화적이에요")을 쓴다. 태그가 없으면 `[]`
+  - `kind`: `place`(장소 평가) / `visitor`(방문 조건). **`code` 의 `visit_` 접두어로 판별하지 말 것** — 접두어는 규칙이 아니라 우연이다
 - `author`: 레거시 표시용 닉네임 문자열. iOS가 라이브로 쓰고 있어 유지된다
 - `authorInfo`: 작성자 프로필 — `nickname`, `reviewCount`(해당 작성자의 총 리뷰 수)
   - `level`: **저장하지 않고 `reviewCount`에서 파생.** 임계값 1·3·6·10·20·50·100 (0건=1, 1\~2건=2, 3\~5건=3, 6\~9건=4, 10\~19건=5, 20\~49건=6, 50\~99건=7, 100건+=8)
@@ -974,6 +1011,16 @@ GET /v1/reviews?contentId=125984&visitorTag=visit_wheelchair
 ```
 휠체어로 방문한 사람의 후기만 옵니다. `visitorTag` 는 **`visitor` 종류만** 받습니다 — `place`
 코드를 넣으면 0건입니다(두 축이 섞이지 않게).
+
+**걸러내기와 올리기는 다른 것입니다.** 이름이 비슷해 섞이기 쉬워 갈라 두었습니다:
+
+| | 쿼리 `visitorTag` | 헤더 `x-visitor-tags` |
+|---|---|---|
+| 하는 일 | 그 조건인 후기**만** 남긴다 | 그 조건인 후기를 **위로** 올린다 |
+| 안 맞는 후기 | 사라진다 | 아래에 남는다 |
+| 개수 | 여러 개 아님(1개) | 최대 5개 |
+| `total` | 줄어든다 | 그대로 |
+| 쓰는 곳 | 장소 상세의 "휠체어 방문만 보기" | 홈 추천 정렬 |
 
 - ⚠️ **요약 막대(`/v1/reviews/summary`)는 `place` 만 집계합니다.** 섞으면 "21명이 무장애 친화적이라고 했다"와 "21명이 휠체어로 방문했다"가 같은 막대에 서서 뜻이 깨집니다
 - ⚠️ **프로필의 `accessFeatures` 는 계속 비공개입니다.** 방문 조건은 이용자가 그 글에 직접 밝힌 내용이라 민감정보 공개가 아닙니다 — 글 하나에만 붙고, 후기를 지우면 함께 사라집니다
