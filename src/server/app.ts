@@ -491,6 +491,35 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
       + (handicapetc ~ '이동보조|전동스쿠터|스쿠터|보행보조')::int)`,
   };
 
+  /**
+   * 후기 태그 코드 → 장소 접근성 그룹 이름.
+   *
+   *  ⚠️ **접두어를 떼서 만들지 않는다.** 한때 `v.replace(/^visit_/, '')` 였는데, 그게 되는 것은
+   *     이 다섯 개가 우연히 그렇게 생겼기 때문이지 규칙이라서가 아니다. 같은 다섯 축인데
+   *     저장하는 곳마다 이름이 다르다 — 세 벌이고, 하나는 어간조차 다르다:
+   *
+   *       축     access_features(030·027)      access= (여기)   review_tag_defs(051)
+   *       지체   wheelchairAccessible          wheelchair       visit_wheelchair
+   *       시각   visuallyImpairedFriendly      visual           visit_visual
+   *       청각   hearingFriendly               hearing          visit_hearing
+   *       유아   childFriendly                 infant           visit_infant     ← child ↔ infant
+   *       고령   elderlyFriendly               elderly          visit_elderly
+   *
+   *     유아 축을 보면 문자열 규칙으로는 서로 못 간다. 접두어로 되던 것은 세 벌 중 두 벌이
+   *     마침 겹쳤을 뿐이고, 다음에 하나가 어긋나면 **떼기가 조용히 빗나간다**. 표로 적는다.
+   *
+   *  ⚠️ 여기 없는 코드는 그냥 안 걸린다(400 이 아니다) — 앱이 서버보다 먼저 축을 늘릴 수 있고,
+   *     그때 400 을 주면 홈 화면 전체가 빈다. 다만 **필터가 덜 걸리는 쪽**이라 결과가 늘어난다.
+   *     축 이름을 손대는 날 이 표를 같이 고쳐야 하는 이유다.
+   */
+  const VISITOR_TO_ACCESS_GROUP: Record<string, string> = {
+    visit_wheelchair: 'wheelchair',
+    visit_visual: 'visual',
+    visit_hearing: 'hearing',
+    visit_infant: 'infant',
+    visit_elderly: 'elderly',
+  };
+
   v1.get('/barrier-free', async (c) => {
     const { limit, offset } = paging(c);
     const where: string[] = [];
@@ -513,12 +542,13 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     //  ⚠️ 데이터가 얇은 그룹이 있다. 청각은 전국 107곳뿐이라(관광지 27·맛집 22·숙소 23·축제 0)
     //     이 필터를 걸면 목록이 빠르게 바닥난다. 채워 넣지 않는다 — 없는 것을 있는 것처럼
     //     보여 주면 무장애 앱에서는 그게 가장 나쁜 거짓말이다.
-    //  ⚠️ 이 값도 민감정보다. **x-visitor-tags 헤더로도 받는다** — 축 이름은 후기 태그와 다르니
-    //     visit_ 접두어를 떼고 본다(휠체어 축이 여기서는 wheelchair, 후기에서는
-    //     visit_wheelchair 다). 앱이 헤더로 옮기면 URL 에서 사라진다.
-    //     쿼리스트링도 계속 받는다 — 심사 중인 빌드가 쓰고 있어 끊으면 홈이 빈다.
+    //  ⚠️ 이 값도 민감정보다. **x-visitor-tags 헤더로도 받는다.** 앱이 헤더로 옮기면 URL 에서
+    //     사라진다. 쿼리스트링도 계속 받는다 — 심사 중인 빌드가 쓰고 있어 끊으면 홈이 빈다.
     const accessGroups = (visitorTagsOf(c).length
-      ? visitorTagsOf(c).map((v) => v.replace(/^visit_/, ''))
+      // 표에 있으면 옮기고, 없으면 그대로 흘린다 — 아래 filter 가 유효한 그룹 이름만 남긴다.
+      //  즉 헤더로 visit_wheelchair 도 wheelchair 도 받는다. 둘 다 받는 이유: 좁히면 옛 값을
+      //  보내는 클라이언트가 **필터를 조용히 잃고**, 그건 갈 수 없는 곳이 더 나오는 방향이다.
+      ? visitorTagsOf(c).map((v) => VISITOR_TO_ACCESS_GROUP[v] ?? v)
       : (c.req.query('access') ?? '').split(',').map((v) => v.trim())
     ).filter((name) => ACCESS_GROUP_COLUMNS[name]);
     for (const name of accessGroups) where.push(ACCESS_GROUP_COLUMNS[name]!);

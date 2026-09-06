@@ -33,3 +33,29 @@ begin
       foreign key (tag_code) references review_tag_defs(code) on delete restrict;
   end if;
 end $$;
+
+-- ── 축 이름을 바꾸려는 사람에게 (같은 축이 세 곳에 다른 이름으로 있다) ────────────────
+--
+--  위 restrict 는 **한 어휘만** 덮는다. 같은 다섯 축이 세 벌로 저장돼 있고 저장 방식이 다르다:
+--
+--    축     authors/posts.access_features   /v1/barrier-free?access=   review_tag_defs
+--           (030 · 027, 그냥 text[])        (코드 안의 고정 맵)        (이 표, FK 있음)
+--    지체   wheelchairAccessible            wheelchair                 visit_wheelchair
+--    시각   visuallyImpairedFriendly        visual                     visit_visual
+--    청각   hearingFriendly                 hearing                    visit_hearing
+--    유아   childFriendly                   infant                     visit_infant
+--    고령   elderlyFriendly                 elderly                    visit_elderly
+--
+--  ⚠️ **한 번의 이름 변경이 세 곳에 정반대로 도착한다.**
+--       · review_tag_defs      → FK 가 막는다. 에러가 난다. 알게 된다.
+--       · access= 맵           → 앱이 보내는 이름과 어긋나면 필터가 그냥 안 걸린다.
+--       · access_features      → 검증할 표가 없다. 옛 문자열이 그대로 남아 아무것과도 안 맞는다.
+--    소실이 아니라 불일치라 052 가 막은 것보다 가볍지만, **이 열이 050 에서 민감정보로 분류한
+--    바로 그 열이다.** 무거운 쪽에 자물쇠가 없다.
+--
+--  ⚠️ **access_features 에 CHECK 를 걸지 않았다.** 걸면 앱이 축을 늘릴 때마다 서버 배포가
+--     먼저여야 하고, 그 순서가 어긋나면 가입·프로필 저장이 400 이 된다 — 050 때 실제로 낸 사고다.
+--     자유 문자열로 두는 것이 그때 배운 것의 결과이고, 대신 이 표를 여기 남긴다.
+--
+--  유아 축이 childFriendly ↔ infant ↔ visit_infant 다. 어간이 서로 다르므로 **문자열 규칙으로
+--  세 벌 사이를 오갈 수 없다.** 접두어를 떼거나 붙여 맞히려 들지 말 것.
