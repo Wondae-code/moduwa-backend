@@ -1262,21 +1262,22 @@ DELETE /v1/blocks/:uuid        🔒 → 204   (없는 것도 204)
 **같은 표·같은 행**에 쌓입니다 — 두 경로로 같은 후기를 신고하면 행이 둘이 되지 않습니다.
 새로 붙이는 화면은 `/v1/reports`를 쓰세요.
 
-## 푸시 알림 (APNs)
+## 푸시 알림 (APNs · Firebase Cloud Messaging)
 
 ### POST /v1/devices — 기기 토큰 등록  🔒
 알림 권한을 받은 직후, 그리고 **로그인할 때마다** 부른다. 성공 시 **204**(본문 없음).
 
 | 필드 | 필수 | 설명 |
 |---|---|---|
-| `token` | ✅ | APNs 기기 토큰(hex 32~200자). 형식이 다르면 400 `invalid_token` |
-| `environment` | ✅ | `sandbox`(Xcode 빌드) 또는 `production`(TestFlight·앱스토어). 다르면 400 `invalid_environment` |
-| `platform` | | 기본 `ios` |
+| `token` | ✅ | iOS는 APNs 기기 토큰, Android는 FCM 등록 토큰. 형식이 다르면 400 `invalid_token` |
+| `environment` | iOS만 ✅ | `sandbox`(Xcode 빌드) 또는 `production`(TestFlight·앱스토어). Android는 `production`으로 정규화 |
+| `platform` | | `ios`(기본) 또는 `android` |
 | `bundleId` | | 진단용 |
 
-- ⚠️ **`environment`를 필수로 막았다.** 반대쪽 게이트웨이로 보내면 애플이 `BadDeviceToken`으로 **조용히** 거절해서, 이 값이 없으면 왜 안 오는지 진단조차 못 한다
+- ⚠️ iOS는 **`environment`를 필수로 막았다.** 반대쪽 게이트웨이로 보내면 애플이 `BadDeviceToken`으로 **조용히** 거절해서, 이 값이 없으면 왜 안 오는지 진단조차 못 한다
+- Android FCM 토큰에는 APNs 환경 구분이 없어서 `environment`를 생략해도 된다
 - 토큰이 PK라 재등록은 upsert이고 **`author_id`까지 갱신**한다 — 한 기기를 다른 계정으로 로그인하면 소유자가 바뀌어야 한다. 안 그러면 로그아웃한 사람에게 알림이 계속 간다
-- 서버가 `BadDeviceToken`(400)이나 `Unregistered`(410)를 받으면 그 토큰을 지운다. 앱이 따로 정리할 필요는 없다
+- 서버가 APNs `BadDeviceToken`/`Unregistered` 또는 FCM `registration-token-not-registered`를 받으면 그 토큰을 지운다. 앱이 따로 정리할 필요는 없다
 
 ### DELETE /v1/devices/:token — 해제  🔒
 로그아웃·알림 스위치 끄기에서 부른다. 성공 시 **204**.

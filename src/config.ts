@@ -145,6 +145,14 @@ export const config = {
     likeDedupeHours: num('APNS_LIKE_DEDUPE_HOURS', 24),
   },
 
+  // ── 푸시 알림(Android / Firebase Cloud Messaging) ──
+  //  Firebase Console → 프로젝트 설정 → 서비스 계정 → 새 비공개 키 생성에서 받은 JSON을
+  //  base64 로 인코딩해 넣는다. JSON 파일 자체를 저장소나 컨테이너 이미지에 넣지 않는다.
+  //  키가 비면 APNs와 같은 방식으로 콘솔에만 기록해 로컬 개발을 막지 않는다.
+  fcm: {
+    serviceAccountBase64: process.env.FIREBASE_SERVICE_ACCOUNT_BASE64?.trim() ?? '',
+  },
+
   // ── Sign in with Apple 토큰 폐기 ──
   //  ⚠️ **APNs 키와 다른 키다.** 같은 개발자 계정이지만 용도가 다른 별도 .p8 이다(용도:
   //     Sign in with Apple). APNs 키로 서명하면 애플이 거부한다.

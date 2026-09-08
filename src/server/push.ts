@@ -1,4 +1,4 @@
-// 푸시 알림(APNs) — 이 파일만 애플을 안다.
+// 푸시 알림(APNs + Firebase Cloud Messaging).
 //
 // mailer.ts 가 메일 provider 를 혼자 아는 것과 같은 구조다. 호출부는 "누구에게 무엇을 알린다"만
 // 알고, 토큰 관리·JWT 서명·게이트웨이 선택·죽은 토큰 정리는 전부 여기 있다.
@@ -20,6 +20,8 @@
 //    지워지고, 임의의 수를 보내면 실제와 어긋난다. 알림 목록 API 가 생기면 그때 넣는다.
 import { createSign } from 'node:crypto';
 import http2 from 'node:http2';
+import { cert, getApps, initializeApp, type App as FirebaseApp } from 'firebase-admin/app';
+import { getMessaging, type Messaging } from 'firebase-admin/messaging';
 import { config } from '../config';
 import { query } from '../db';
 
@@ -29,6 +31,29 @@ const GATEWAY = {
 } as const;
 
 type Env = keyof typeof GATEWAY;
+
+let cachedFirebaseApp: FirebaseApp | null = null;
+
+/** Railway 환경변수의 서비스 계정으로 FCM 클라이언트를 지연 초기화한다. */
+function fcmMessaging(): Messaging | null {
+  const encoded = config.fcm.serviceAccountBase64;
+  if (!encoded) return null;
+  if (cachedFirebaseApp) return getMessaging(cachedFirebaseApp);
+
+  const raw = Buffer.from(encoded, 'base64').toString('utf8');
+  const account = JSON.parse(raw) as Record<string, unknown>;
+  const projectId = typeof account.project_id === 'string' ? account.project_id : '';
+  const clientEmail = typeof account.client_email === 'string' ? account.client_email : '';
+  const privateKey = typeof account.private_key === 'string' ? account.private_key : '';
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT_BASE64 값이 올바른 서비스 계정 JSON이 아닙니다.');
+  }
+
+  cachedFirebaseApp = getApps()[0] ?? initializeApp({
+    credential: cert({ projectId, clientEmail, privateKey }),
+  });
+  return getMessaging(cachedFirebaseApp);
+}
 
 /** APNs 인증 토큰. 최대 1시간 유효 — 55분에 갱신해 경계에서 만료되지 않게 한다. */
 let cachedJwt: { token: string; at: number } | null = null;
@@ -159,18 +184,18 @@ export async function pushToAuthor(
       if (dup.rowCount) return;   // 창 안에서 이미 보냈다
     }
 
-    const devices = (await query<{ token: string; environment: string }>(
-      'select token, environment from device_tokens where author_id = $1', [authorId],
+    const devices = (await query<{ token: string; platform: string; environment: string }>(
+      'select token, platform, environment from device_tokens where author_id = $1', [authorId],
     )).rows;
     if (devices.length === 0) return;   // 알림을 안 켠 사람 — 정상 경로다
 
     const jwt = providerToken();
-    if (!jwt) {
-      // 키가 없으면 콘솔로 보낸다(mailer 와 같은 판단). 로컬에서 트리거를 검증할 수 있다.
-      console.log(`[push] (콘솔 — APNS 키 미설정) → author ${authorId} · ${payload.title}`
-        + `\n  | ${payload.body}\n  | data=${JSON.stringify(payload.data)} devices=${devices.length}`);
-      await log(authorId, eventKey, true, 'console');
-      return;
+    let fcm: Messaging | null = null;
+    let fcmInitError: string | null = null;
+    try {
+      fcm = fcmMessaging();
+    } catch (err) {
+      fcmInitError = String(err).slice(0, 300);
     }
 
     const aps: Record<string, unknown> = {
@@ -183,8 +208,46 @@ export async function pushToAuthor(
 
     let anyOk = false;
     const failures: string[] = [];
+    let consoleDevices = 0;
 
     for (const d of devices) {
+      if (d.platform === 'android') {
+        if (!fcm) {
+          if (fcmInitError) failures.push(`FCM 설정 오류: ${fcmInitError}`);
+          else consoleDevices += 1;
+          continue;
+        }
+        try {
+          await fcm.send({
+            token: d.token,
+            notification: { title: payload.title, body: payload.body },
+            data: payload.data,
+            android: {
+              priority: 'high',
+              notification: {
+                sound: 'default',
+                ...(payload.threadId ? { tag: payload.threadId } : {}),
+              },
+            },
+          });
+          anyOk = true;
+        } catch (err) {
+          const code = typeof err === 'object' && err !== null && 'code' in err
+            ? String((err as { code?: unknown }).code ?? '')
+            : '';
+          failures.push(`FCM ${code || String(err)}`.slice(0, 300));
+          if (code === 'messaging/registration-token-not-registered'
+            || code === 'messaging/invalid-registration-token') {
+            await query('delete from device_tokens where token = $1', [d.token]);
+          }
+        }
+        continue;
+      }
+
+      if (!jwt) {
+        consoleDevices += 1;
+        continue;
+      }
       const env: Env = d.environment === 'sandbox' ? 'sandbox' : 'production';
       try {
         const res = await apnsSend(env, d.token, jwt, bodyJson);
@@ -203,7 +266,17 @@ export async function pushToAuthor(
       }
     }
 
-    await log(authorId, eventKey, anyOk, failures.length ? failures.join(' | ').slice(0, 500) : null);
+    if (consoleDevices > 0) {
+      // 키가 없는 플랫폼은 콘솔로 보낸다. 로컬에서도 트리거와 문구를 검증할 수 있다.
+      console.log(`[push] (콘솔 — 발송 키 미설정) → author ${authorId} · ${payload.title}`
+        + `\n  | ${payload.body}\n  | data=${JSON.stringify(payload.data)} devices=${consoleDevices}`);
+      anyOk = true;
+    }
+
+    const detail = failures.length
+      ? failures.join(' | ').slice(0, 500)
+      : consoleDevices > 0 ? 'console' : null;
+    await log(authorId, eventKey, anyOk, detail);
     if (!anyOk && failures.length) console.warn(`[push] author ${authorId} 발송 실패: ${failures[0]}`);
   } catch (err) {
     // 알림 경로의 예외가 원 요청을 깨뜨리지 않게 여기서 삼킨다(위 주석).

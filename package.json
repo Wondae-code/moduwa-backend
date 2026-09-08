@@ -32,6 +32,7 @@
   "dependencies": {
     "@hono/node-server": "^2.0.8",
     "dotenv": "^16.4.7",
+    "firebase-admin": "^14.3.0",
     "hono": "^4.12.29",
     "jose": "^6.2.10",
     "pg": "^8.13.1",

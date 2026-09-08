@@ -3291,9 +3291,9 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   })
 
   // ── 푸시 알림 기기 토큰(044) ────────────────────────────────────────────────
-  //  발송 코드는 APNs 인증 키(.p8)가 도착한 뒤에 붙는다. 등록은 그와 독립이라 먼저 연다 —
-  //  앱이 권한 요청·등록을 먼저 붙일 수 있고, 키가 오면 대상이 이미 쌓여 있다.
+  // iOS는 APNs, Android는 FCM 토큰을 같은 테이블에 platform으로 구분해 보관한다.
   const DEVICE_ENVIRONMENTS = new Set(['sandbox', 'production'])
+  const DEVICE_PLATFORMS = new Set(['ios', 'android'])
 
   v1.post('/devices', async (c) => {
     const gate = requireAuth(c)
@@ -3307,19 +3307,32 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     }
     const p = (payload ?? {}) as Record<string, unknown>
     const token = typeof p.token === 'string' ? p.token.trim() : ''
-    // APNs 기기 토큰은 hex 문자열이다. 형식을 막아 두면 잘못된 값이 발송 대상에 쌓이지 않는다.
-    if (!/^[0-9a-fA-F]{32,200}$/.test(token)) {
-      return c.json({ error: 'invalid_token', message: '기기 토큰 형식이 올바르지 않습니다.' }, 400)
+    const platform = typeof p.platform === 'string' && p.platform.trim()
+      ? p.platform.trim().toLowerCase()
+      : 'ios'
+    if (!DEVICE_PLATFORMS.has(platform)) {
+      return c.json({ error: 'invalid_platform', message: "platform 은 'ios' 또는 'android' 여야 합니다." }, 400)
     }
-    const environment = typeof p.environment === 'string' ? p.environment.trim() : ''
-    // ⚠️ 여기서 막지 않으면 잘못된 게이트웨이로 보내 BadDeviceToken 으로 **조용히** 실패한다.
-    if (!DEVICE_ENVIRONMENTS.has(environment)) {
+
+    // APNs 토큰은 hex다. FCM 등록 토큰은 형식이 공개 계약이 아닌 opaque 문자열이라 문자군을
+    // 임의로 제한하지 않고 길이와 공백만 검사한다(형식 변경으로 정상 토큰을 막지 않기 위함).
+    const validToken = platform === 'ios'
+      ? /^[0-9a-fA-F]{32,200}$/.test(token)
+      : token.length >= 20 && token.length <= 4096 && !/\s/.test(token)
+    if (!validToken) {
+      return c.json({ error: 'invalid_token', message: `${platform} 기기 토큰 형식이 올바르지 않습니다.` }, 400)
+    }
+
+    // Android에는 sandbox/production 게이트웨이 구분이 없지만 기존 not null 스키마와 요청
+    // 모델을 단순하게 유지하려고 production으로 정규화한다.
+    const requestedEnvironment = typeof p.environment === 'string' ? p.environment.trim() : ''
+    const environment = platform === 'android' ? 'production' : requestedEnvironment
+    if (platform === 'ios' && !DEVICE_ENVIRONMENTS.has(environment)) {
       return c.json({
         error: 'invalid_environment',
         message: "environment 는 'sandbox' 또는 'production' 이어야 합니다.",
       }, 400)
     }
-    const platform = typeof p.platform === 'string' && p.platform.trim() ? p.platform.trim() : 'ios'
     const bundleId = typeof p.bundleId === 'string' ? p.bundleId.trim() : ''
 
     // 토큰이 PK 라 재등록은 upsert 다. **author_id 까지 갱신**하는 것이 중요하다 —
