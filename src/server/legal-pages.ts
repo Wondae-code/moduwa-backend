@@ -38,17 +38,52 @@ const OPERATOR = {
 /** 운영자 성명이 비어 있으면 그 자리를 눈에 보이게 표시한다 — 조용히 빈칸으로 배포되지 않게. */
 const who = OPERATOR.name || '(운영자 성명 미기재)';
 
+/**
+ * 좌상단 브랜드 워드마크 — "모두와" 를 글자가 아니라 앱 로고로 보여준다.
+ *
+ * ⚠️ **앱 에셋의 사본이다.** 원본은 iOS `Assets.xcassets/logo.imageset/logo.svg` 이고,
+ *    안드로이드가 같은 도형을 `res/drawable/moduwa_logo_brand.xml`(검정) ·
+ *    `moduwa_logo_lime.xml`(라임) 으로 갖고 있다. 로고가 바뀌면 세 곳을 함께 고친다.
+ *
+ * ── 왜 <img> 가 아니라 인라인 SVG 인가
+ *  이 서버는 정적 파일을 서빙하지 않는다(`/images/reviews/:name` 는 업로드 저장소다).
+ *  파일을 하나 더 두면 라우트와 캐시 헤더가 따라붙고, 그 요청이 실패하면 페이지 첫 줄이
+ *  깨진 이미지가 된다 — 심사자가 여는 페이지에서 가장 피하고 싶은 그림이다. 3KB 짜리
+ *  도형이라 본문에 심는 편이 요청도, 실패할 자리도 없앤다.
+ *
+ * ⚠️ 원본의 고정색(#0B2A1C)을 `currentColor` 로 바꿨다. 다크 모드 배경(#12181B)에 묻지
+ *    않으려면 색이 테마를 따라가야 한다 — 색은 `.brand` 의 `--logo` 가 정한다.
+ *
+ * ⚠️ `role="img"` 과 대체 텍스트를 함께 준다. 글자를 그림으로 바꾼 자리라 이게 없으면
+ *    스크린리더에 페이지 첫 줄이 빈 칸으로 읽힌다 — 무장애를 다루는 서비스의 문서다.
+ *
+ * ⚠️ 원본에는 여섯 개 path 가 모두 `id="Vector"` 로 들어 있다. HTML 안에서 중복 id 는
+ *    문법 위반이라 떼어냈다(쓰는 곳도 없다). 에셋을 다시 받아올 때 함께 떼어낸다.
+ */
+const LOGO = `<svg class="mark" viewBox="0 0 47 31.2" fill="none" role="img" aria-label="${OPERATOR.service}" xmlns="http://www.w3.org/2000/svg">
+<g transform="translate(0.000 1.702)"><path d="M1.80859 0.5H11.8398V8.52344H7.47949V11.4727H11.7705V14.0205H0.5V11.4717H4.93066V8.52344H0.545898V1.7627C0.545898 1.44154 0.657368 1.14696 0.910156 0.864258C1.19293 0.61127 1.48735 0.500034 1.80859 0.5ZM4.4541 3.02539C4.08306 3.02539 3.71215 3.11863 3.43848 3.39258C3.16524 3.66639 3.07227 4.03664 3.07227 4.40723V4.61523C3.07227 4.98603 3.1657 5.35613 3.43945 5.62988C3.7132 5.90359 4.08334 5.99707 4.4541 5.99707H9.26758V3.02539H4.4541Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
+<g transform="translate(14.110 1.771)"><path d="M11.7705 11.3789V13.9287H7.34082V17.4307H4.79102V13.9287H0.5V11.3789H11.7705ZM1.83203 0.5H11.7246V3.00195H4.47656C4.0765 3.00201 3.70658 3.14274 3.44727 3.46973C3.21819 3.75884 3.11474 4.11625 3.0957 4.49805L3.09375 4.52539L3.0957 4.55273C3.11646 4.90575 3.22823 5.23091 3.43555 5.51367C3.68849 5.85939 4.05949 6.02045 4.47656 6.02051H11.7246V8.52344H0.592773V1.7627C0.592855 1.3761 0.716103 1.09433 0.948242 0.873047L0.957031 0.864258L0.964844 0.855469C1.18964 0.620097 1.46624 0.500095 1.83203 0.5Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
+<g transform="translate(28.490 3.533)"><path d="M5.04199 10.2451L5.21387 10.3057L5.38379 10.2412L6.38965 9.8623V11.4727H9.91504V14.0205H0.5V11.4727H3.84082V9.82227L5.04199 10.2451ZM15.4131 0.5V4.4668H18.0117V7.01562H15.4131V10.8428H12.8643V0.5H15.4131Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
+<g transform="translate(28.420 0.000)"><path d="M5.29883 0.5C8.06013 0.5001 9.9902 2.15194 10.0898 4.46289V4.46387C10.2081 7.10266 8.98145 8.91102 7.70215 10.0781C7.06047 10.6635 6.40901 11.0837 5.91797 11.3564C5.67313 11.4924 5.46955 11.5913 5.3291 11.6553C5.31879 11.66 5.30845 11.6636 5.29883 11.668C5.28921 11.6636 5.27887 11.66 5.26855 11.6553C5.12818 11.5913 4.92446 11.4925 4.67969 11.3564C4.18911 11.0838 3.53875 10.6642 2.89746 10.0791C1.61866 8.91213 0.391846 7.10325 0.507812 4.46387C0.611675 2.15084 2.53824 0.5 5.29883 0.5ZM5.29883 2.00195C3.81056 2.00195 2.60156 3.20556 2.60156 4.69922C2.60159 6.19162 3.80934 7.40039 5.29883 7.40039C6.79235 7.40025 7.99997 6.18739 8 4.69922C8 3.20919 6.78637 2.00209 5.29883 2.00195Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
+<g transform="translate(38.320 19.023)"><path d="M3.42871 4.24316L2.62305 2.63184L2.47363 2.55664L1.08887 1.86426L4.82324 0.704102L3.42871 4.24316Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
+<g transform="translate(0.550 22.561)"><path d="M38.7168 0.99707C33.7844 5.53911 26.8455 8.14746 19.5859 8.14746C12.4674 8.14731 5.62111 5.62444 0.710938 1.22949L0.989258 0.930664C5.84129 5.27114 12.5882 7.73924 19.5859 7.73926C26.5869 7.73926 33.5524 5.18749 38.4336 0.701172L38.7168 0.99707Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
+</svg>`;
+
 const STYLE = `
-  :root{--fg:#1C2B33;--muted:#5B6B73;--bg:#F7F8F8;--panel:#fff;--accent:#0B5F6B;--tint:#EEF4F5;--line:#E3E8EA}
+  :root{--fg:#1C2B33;--muted:#5B6B73;--bg:#F7F8F8;--panel:#fff;--accent:#0B5F6B;--tint:#EEF4F5;--line:#E3E8EA;
+        --logo:#0B2A1C}
   @media (prefers-color-scheme:dark){
-    :root{--fg:#E6EBED;--muted:#9BAAB1;--bg:#12181B;--panel:#1A2226;--accent:#5FBECB;--tint:#222E33;--line:#2A363B}
+    :root{--fg:#E6EBED;--muted:#9BAAB1;--bg:#12181B;--panel:#1A2226;--accent:#5FBECB;--tint:#222E33;--line:#2A363B;
+          --logo:#A7E100}
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);line-height:1.75;
        font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Pretendard','Noto Sans KR',sans-serif;
        font-size:15px;-webkit-text-size-adjust:100%}
   .wrap{max-width:720px;margin:0 auto;padding:32px 20px 72px}
-  .brand{font-weight:700;font-size:14px;color:var(--accent);letter-spacing:.02em;margin-bottom:24px}
+  .brand{color:var(--logo);margin-bottom:24px;line-height:0}
+  /* 세로 30px 이면 원본 비율(47:31.2)로 폭이 45px 남짓 — 본문 15px 위에서 제목처럼 읽힌다. */
+  .brand .mark{height:30px;width:auto;display:block}
   h1{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:0 0 6px}
   .eff{color:var(--muted);font-size:13px;margin:0 0 28px}
   h2{font-size:16px;font-weight:700;margin:34px 0 10px;padding-top:20px;border-top:1px solid var(--line)}
@@ -79,7 +114,7 @@ const shell = (title: string, body: string, sub = `시행일 ${OPERATOR.effectiv
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${OPERATOR.service} — ${title}</title>
 <style>${STYLE}</style></head><body><div class="wrap">
-<div class="brand">${OPERATOR.service}</div>
+<div class="brand">${LOGO}</div>
 <h1>${title}</h1>
 <p class="eff">${sub}</p>
 ${body}
