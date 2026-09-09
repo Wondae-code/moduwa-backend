@@ -8,7 +8,7 @@ import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
-import { privacyPage, supportPage, termsPage } from './legal-pages';
+import { accountDeletionPage, privacyPage, supportPage, termsPage } from './legal-pages';
 import { toHttps } from './image-url';
 import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
@@ -121,7 +121,8 @@ export function buildApp(): Hono<AppEnv> {
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
       'GET /p/:contentId  (장소 공유 대체 페이지 — 인증 불필요)',
-      'GET /privacy · /terms  (개인정보 처리방침 · 이용약관 — 인증 불필요)',
+      'GET /privacy · /terms · /support  (개인정보 처리방침 · 이용약관 · 고객 지원 — 인증 불필요)',
+      'GET /delete-account  (계정 및 데이터 삭제 요청 — 인증 불필요)',
       '',
       '🔒 = X-Session-Token 필요. POST /v1/auth/email/sign-up · sign-in 으로 발급.',
       ...(config.dashboard.password ? ['GET /dashboard  (수집 현황 대시보드 — 비밀번호 로그인)'] : []),
@@ -335,6 +336,15 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   //  App Store Connect 의 Support URL 이 가리킨다. 루트(/)는 API JSON 이라 쓸 수 없다 —
   //  심사자가 JSON 을 보면 메타데이터 리젝이다.
   app.get('/support', (c) => c.html(supportPage()));
+
+  //  계정·데이터 삭제 요청 페이지 — 구글 플레이 콘솔의 "계정 삭제 요청 URL" 이 가리킨다
+  //  (legal-pages.ts 의 accountDeletionPage 주석). **로그인도 앱 설치도 없이** 열려야 한다.
+  //  ⚠️ 별칭을 함께 연다 — 스토어 심사 자료·메일에 옮겨 적히는 URL 이라 손으로 치는 경우가
+  //     있고, 삭제 안내가 404 로 뜨는 것이 그대로 정책 위반이 된다. 리다이렉트가 아니라
+  //     같은 내용을 뱉는다(리다이렉트를 막아 둔 크롤러·인앱 웹뷰가 있다).
+  for (const path of ['/delete-account', '/account-deletion', '/data-deletion'] as const) {
+    app.get(path, (c) => c.html(accountDeletionPage()));
+  }
 
   app.get('/health', async (c) => {
     try {

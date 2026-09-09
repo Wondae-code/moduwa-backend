@@ -84,7 +84,7 @@ const shell = (title: string, body: string, sub = `시행일 ${OPERATOR.effectiv
 <p class="eff">${sub}</p>
 ${body}
 <footer>${OPERATOR.service} · 문의 <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a><br>
-<a href="/privacy">개인정보 처리방침</a> · <a href="/terms">이용약관</a></footer>
+<a href="/privacy">개인정보 처리방침</a> · <a href="/terms">이용약관</a> · <a href="/delete-account">계정 및 데이터 삭제</a></footer>
 </div></body></html>`;
 
 export const privacyPage = () => shell('개인정보 처리방침', `
@@ -150,7 +150,8 @@ export const privacyPage = () => shell('개인정보 처리방침', `
 
 <h2>5. 회원 탈퇴와 작성물의 처리</h2>
 <p>앱 안에서 <b>설정 → 프로필 편집 → 회원 탈퇴</b>로 언제든 계정을 삭제할 수 있으며,
-<b>되돌릴 수 없습니다.</b></p>
+<b>되돌릴 수 없습니다.</b> 앱을 이미 지우셨거나 로그인할 수 없는 경우에는
+<a href="/delete-account">계정 및 데이터 삭제</a> 페이지의 안내대로 메일로 요청하실 수 있습니다.</p>
 <div class="box">
 <p><b>탈퇴하면 즉시 삭제되는 것</b></p>
 <ul>
@@ -370,7 +371,9 @@ export const supportPage = () => shell('고객 지원', `
 함께 대화한 분들의 글이 같이 사라지지 않게 하기 위한 것입니다.
 <b>탈퇴 전에 직접 지우시면 작성물도 함께 사라집니다.</b></li>
 </ul>
-<p>자세한 내용은 <a href="/privacy">개인정보 처리방침</a> 5항에 있습니다.</p>
+<p>앱을 이미 지우셨거나 로그인할 수 없다면 <a href="/delete-account">계정 및 데이터 삭제</a>
+페이지에서 메일로 요청하실 수 있습니다. 지워지는 항목은
+<a href="/privacy">개인정보 처리방침</a> 5항에 자세히 있습니다.</p>
 <h3>내가 쓴 글·후기를 지우고 싶어요</h3>
 <p>글이나 후기의 <b>⋮ 메뉴 → 삭제</b>에서 언제든 지우실 수 있습니다. 게시글은
 <b>⋮ 메뉴 → 수정</b>으로 고칠 수도 있습니다.</p>
@@ -386,3 +389,128 @@ export const supportPage = () => shell('고객 지원', `
 <p>${OPERATOR.service} · ${who}<br>
 문의: <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a></p>
 `, '무장애 여행을 위한 안내와 문의');
+
+/**
+ * 계정·데이터 삭제 요청 페이지 — `/delete-account`.
+ *
+ * ── 왜 페이지를 따로 두나
+ *  구글 플레이 콘솔 › **앱 콘텐츠 › 데이터 보안** 에 "계정 삭제 요청 URL" 칸이 있다. 계정을
+ *  만들 수 있는 앱은 이 URL 을 반드시 제출해야 하고, 요구가 셋이다.
+ *    ① 로그인·앱 설치 없이 열리는 공개 URL
+ *    ② **계정과 데이터의 삭제를 요청하는 방법**이 그 페이지에 있다
+ *    ③ 지워지는 것과 남는 것(남기는 이유·보관 기간)을 밝힌다
+ *  /support 안의 한 문단으로 갈음하지 않는다 — 심사자가 링크를 열면 여러 안내 중 하나로
+ *  읽히고, ②를 "안내만 있고 요청 경로가 없다" 로 판단하면 그대로 되돌아온다. URL 하나가
+ *  그 일만 하는 페이지여야 링크를 연 자리에서 확인이 끝난다.
+ *
+ * ⚠️ **앱을 지운 사람도 삭제할 수 있어야 한다.** 앱 안 경로(설정 → 프로필 편집 → 회원 탈퇴)만
+ *    적으면 ②를 못 채운다 — 앱을 이미 지웠거나 비밀번호를 잊어 로그인할 수 없는 사람에게는
+ *    메일 요청이 유일한 길이고, 플레이 정책이 요구하는 것도 그 경로다.
+ *
+ * ⚠️ **본인 확인 없이 지워 주지 않는다.** 닉네임만으로 처리하면 남의 계정을 지우는 수단이
+ *    된다. 가입 메일 주소에서 온 요청이거나, 그 주소로 되물어 확인한 뒤에 삭제한다.
+ *
+ * ⚠️ **privacy@moduwa.app 이 실제로 받을 수 있어야 한다**(supportPage 주석과 같은 이유).
+ *    여기로 보낸 삭제 요청이 사라지면 정책 위반이 된다. 주소나 DNS 를 옮길 때 함께 본다.
+ *
+ * ⚠️ **화면 경로·라벨은 앱 화면 그대로 적는다.** 2026-09-09 확인: 안드로이드도
+ *    `설정 → 프로필 편집 → 회원 탈퇴`(AccountSettingsScreen.kt), 무장애 특성은
+ *    `설정 → 내 무장애정보 편집`, 알림은 `설정 → 알림 설정`이다. 화면 이름이 바뀌면 이
+ *    파일에서 "설정 → " 을 전부 찾아 함께 고친다.
+ *
+ * ⚠️ **표의 내용은 auth-routes.ts 의 `DELETE /me` 와 한 줄씩 대응한다.** 삭제 트랜잭션에서
+ *    지우는 테이블이 늘거나 줄면 이 표도 같은 커밋에서 고친다 — 실제와 어긋난 안내가
+ *    리젝 사유다.
+ */
+export const accountDeletionPage = () => shell('계정 및 데이터 삭제', `
+<div class="box warn">
+<p><b>앱을 쓸 수 있는 상태라면</b> 앱의 <b>설정 → 프로필 편집 → 회원 탈퇴</b>가 가장 빠릅니다(즉시 처리).
+<b>앱을 이미 지우셨거나 로그인할 수 없다면</b> 아래 <a href="#mail">메일 요청</a>으로 처리해 드립니다.</p>
+</div>
+
+<h2>1. 앱에서 직접 삭제 — 즉시</h2>
+<ol>
+<li><b>${OPERATOR.service}</b> 앱을 열고 <b>설정</b>으로 이동합니다.</li>
+<li>화면 오른쪽 위 <b>프로필 편집</b>을 누릅니다.</li>
+<li>맨 아래 <b>회원 탈퇴</b>를 누르고 확인합니다.</li>
+</ol>
+<p>확인을 누르면 <b>즉시</b> 처리되며, <b>되돌릴 수 없습니다.</b></p>
+
+<h2 id="mail">2. 앱 없이 메일로 요청</h2>
+<p>앱을 이미 삭제하셨거나 비밀번호를 잊어 로그인할 수 없다면 아래 주소로 요청해 주세요.
+앱을 다시 설치하지 않아도 됩니다.</p>
+<div class="box">
+<p><b><a href="mailto:${OPERATOR.privacyContact}?subject=%EA%B3%84%EC%A0%95%20%EC%82%AD%EC%A0%9C%20%EC%9A%94%EC%B2%AD">${OPERATOR.privacyContact}</a></b></p>
+<p>메일에 아래 두 가지를 적어 주세요.</p>
+<ul>
+<li>가입에 사용한 <b>이메일 주소</b>, 또는 <b>소셜 로그인 종류</b>(Apple · Google · Kakao)</li>
+<li>앱에서 사용하던 <b>닉네임</b></li>
+</ul>
+<p style="margin-bottom:0">작성물(게시글·후기·댓글)까지 함께 지우고 싶으시면
+<b>"작성물도 함께 삭제"</b>라고 적어 주세요.</p>
+</div>
+<p><b>영업일 기준 3일 안에</b> 처리하고 결과를 회신합니다.</p>
+<p>남의 계정이 지워지는 일을 막기 위해 <b>가입한 이메일 주소로 본인 확인</b>을 거친 뒤에
+삭제합니다. 확인되지 않으면 처리하지 않으며, 그 사실을 회신으로 알려드립니다.</p>
+
+<h2>3. 삭제되는 데이터와 남는 데이터</h2>
+<div class="box">
+<p><b>요청을 처리하는 즉시 삭제되는 것</b></p>
+<ul>
+<li>이메일 주소, 비밀번호, 닉네임, 프로필 사진</li>
+<li>무장애(접근성) 특성 — 민감정보</li>
+<li>소셜 로그인 연동 정보 — Apple 로그인은 Apple 에 <b>연동 해제(토큰 폐기)</b>까지 요청합니다</li>
+<li>로그인 세션, 기기 정보, 푸시 알림 토큰 — 삭제 후에는 알림이 발송되지 않습니다</li>
+<li>저장한 장소, 좋아요, 차단 목록</li>
+<li>혼자 쓰던 여행 플랜</li>
+</ul>
+<p><b>남는 것</b></p>
+<ul>
+<li><b>게시글 · 후기 · 댓글</b> — 작성자 표시를 "탈퇴한 사용자"로 바꾼 상태로 남습니다(아래 설명)</li>
+<li><b>함께 편집하던 여행 플랜</b> — 다른 참여자에게 소유권이 넘어갑니다. 참여자가 없으면 삭제됩니다</li>
+<li><b>신고 내역</b> — 안전한 이용 환경 유지를 위해 남습니다. 계정 정보는 위와 같이 지워지므로
+<b>신고한 사람을 식별할 수 없습니다</b></li>
+</ul>
+</div>
+<p><b>작성물이 남는 이유.</b> 여러 사람이 주고받은 글에서 한쪽만 사라지면 남은 분들의 글이 맥락을
+잃습니다. 그래서 글은 남기고 <b>사람만 지웁니다</b> — 닉네임·프로필 사진·이메일이 모두 삭제되고
+작성자 자리에는 "탈퇴한 사용자"만 남아, 남은 글로 계정을 되짚을 수 없습니다. 글까지 없애고
+싶으시면 <b>삭제 전에</b> 직접 지우시거나, 메일 요청에 함께 적어 주세요.</p>
+<p><b>보관 기간을 따로 두지 않습니다.</b> "즉시 삭제" 로 적은 항목은 요청을 처리하는 그 시점에
+데이터베이스에서 지워집니다. 결제·정산을 하지 않는 서비스여서 법령에 따라 더 보관해야 하는
+거래 기록도 없습니다.</p>
+
+<h2>4. 계정을 지우지 않고 일부만 지우기</h2>
+<p>계정은 그대로 두고 특정 데이터만 지울 수도 있습니다.</p>
+<ul>
+<li><b>무장애(접근성) 특성</b> — 설정 → <b>내 무장애정보 편집</b>에서 선택을 해제하면 지워지고,
+민감정보 동의도 함께 철회됩니다.</li>
+<li><b>게시글 · 후기 · 댓글</b> — 각 글의 <b>⋮ 메뉴 → 삭제</b>.</li>
+<li><b>프로필 사진</b> — 설정 → <b>프로필 편집</b>에서 삭제.</li>
+<li><b>푸시 알림 토큰</b> — 설정 → <b>알림 설정</b>을 끄면 지워집니다.</li>
+</ul>
+
+<h2>5. 문의</h2>
+<p>삭제 절차에 관한 문의는 <a href="mailto:${OPERATOR.privacyContact}">${OPERATOR.privacyContact}</a>,
+그 밖의 문의는 <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a>로 보내주세요.
+처리 내용은 <a href="/privacy">개인정보 처리방침</a> 4·5항에 자세히 적어 두었습니다.</p>
+
+<h2>Account &amp; data deletion (English)</h2>
+<p><b>${OPERATOR.service}</b> (Moduwa, Android &amp; iOS) — developer ${who}.</p>
+<ul>
+<li><b>In the app:</b> Settings → Edit profile → <b>회원 탈퇴</b> (Delete account). Takes effect
+immediately and cannot be undone.</li>
+<li><b>Without the app:</b> email <a href="mailto:${OPERATOR.privacyContact}">${OPERATOR.privacyContact}</a>
+with the address you signed up with (or your social login provider) and your nickname. We verify
+ownership through that email address and complete the deletion within 3 business days. Reinstalling
+the app is not required.</li>
+<li><b>Deleted immediately:</b> email address, password, nickname, profile photo, accessibility
+(sensitive) attributes, social login links — Apple tokens are revoked with Apple — sessions, device
+identifiers, push tokens, saved places, likes, block list, and solo travel plans. No retention
+period applies.</li>
+<li><b>Kept:</b> posts, reviews and comments remain with the author replaced by "탈퇴한 사용자"
+(deleted user), so other people's conversations stay readable; nothing that links them to the account
+remains. Delete them in the app beforehand, or ask in your email, to have them removed as well.
+Reports are kept for platform safety with the reporting account anonymised as above.</li>
+</ul>
+`, '계정과 개인정보를 지우는 방법 — 앱에서 바로, 또는 메일 요청으로');
