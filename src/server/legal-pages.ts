@@ -442,6 +442,11 @@ export const supportPage = () => shell('고객 지원', `
  *    적으면 ②를 못 채운다 — 앱을 이미 지웠거나 비밀번호를 잊어 로그인할 수 없는 사람에게는
  *    메일 요청이 유일한 길이고, 플레이 정책이 요구하는 것도 그 경로다.
  *
+ * ⚠️ **삭제 말고 다른 이야기를 넣지 않는다.** 문의·FAQ·기능 소개는 /support 가 한다. 이
+ *    페이지는 플레이 콘솔의 "사용자가 계정 및 관련 데이터의 삭제를 요청하는 데 사용할 수
+ *    있는 링크" 칸에 그대로 들어가는 URL 이라, 삭제와 무관한 문단이 늘면 심사자가 찾는
+ *    것(요청 경로)이 문단 사이에 묻힌다.
+ *
  * ⚠️ **본인 확인 없이 지워 주지 않는다.** 닉네임만으로 처리하면 남의 계정을 지우는 수단이
  *    된다. 가입 메일 주소에서 온 요청이거나, 그 주소로 되물어 확인한 뒤에 삭제한다.
  *
@@ -514,38 +519,4 @@ export const accountDeletionPage = () => shell('계정 및 데이터 삭제', `
 <p><b>보관 기간을 따로 두지 않습니다.</b> "즉시 삭제" 로 적은 항목은 요청을 처리하는 그 시점에
 데이터베이스에서 지워집니다. 결제·정산을 하지 않는 서비스여서 법령에 따라 더 보관해야 하는
 거래 기록도 없습니다.</p>
-
-<h2>4. 계정을 지우지 않고 일부만 지우기</h2>
-<p>계정은 그대로 두고 특정 데이터만 지울 수도 있습니다.</p>
-<ul>
-<li><b>무장애(접근성) 특성</b> — 설정 → <b>내 무장애정보 편집</b>에서 선택을 해제하면 지워지고,
-민감정보 동의도 함께 철회됩니다.</li>
-<li><b>게시글 · 후기 · 댓글</b> — 각 글의 <b>⋮ 메뉴 → 삭제</b>.</li>
-<li><b>프로필 사진</b> — 설정 → <b>프로필 편집</b>에서 삭제.</li>
-<li><b>푸시 알림 토큰</b> — 설정 → <b>알림 설정</b>을 끄면 지워집니다.</li>
-</ul>
-
-<h2>5. 문의</h2>
-<p>삭제 절차에 관한 문의는 <a href="mailto:${OPERATOR.privacyContact}">${OPERATOR.privacyContact}</a>,
-그 밖의 문의는 <a href="mailto:${OPERATOR.contact}">${OPERATOR.contact}</a>로 보내주세요.
-처리 내용은 <a href="/privacy">개인정보 처리방침</a> 4·5항에 자세히 적어 두었습니다.</p>
-
-<h2>Account &amp; data deletion (English)</h2>
-<p><b>${OPERATOR.service}</b> (Moduwa, Android &amp; iOS) — developer ${who}.</p>
-<ul>
-<li><b>In the app:</b> Settings → Edit profile → <b>회원 탈퇴</b> (Delete account). Takes effect
-immediately and cannot be undone.</li>
-<li><b>Without the app:</b> email <a href="mailto:${OPERATOR.privacyContact}">${OPERATOR.privacyContact}</a>
-with the address you signed up with (or your social login provider) and your nickname. We verify
-ownership through that email address and complete the deletion within 3 business days. Reinstalling
-the app is not required.</li>
-<li><b>Deleted immediately:</b> email address, password, nickname, profile photo, accessibility
-(sensitive) attributes, social login links — Apple tokens are revoked with Apple — sessions, device
-identifiers, push tokens, saved places, likes, block list, and solo travel plans. No retention
-period applies.</li>
-<li><b>Kept:</b> posts, reviews and comments remain with the author replaced by "탈퇴한 사용자"
-(deleted user), so other people's conversations stay readable; nothing that links them to the account
-remains. Delete them in the app beforehand, or ask in your email, to have them removed as well.
-Reports are kept for platform safety with the reporting account anonymised as above.</li>
-</ul>
-`, '계정과 개인정보를 지우는 방법 — 앱에서 바로, 또는 메일 요청으로');
+`, '계정과 관련 데이터의 삭제를 요청하는 방법');
