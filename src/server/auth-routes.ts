@@ -12,8 +12,11 @@ import type { Context } from 'hono';
 import { config } from '../config';
 import { query, withTransaction } from '../db';
 import {
+  EmailTakenError,
+  type Provider,
   type SignInResult,
   findEmailIdentity,
+  findEmailOwner,
   markEmailVerified,
   setAccessFeatures,
   normalizeEmail,
@@ -149,7 +152,38 @@ async function finishSignIn(result: SignInResult, deviceId: string) {
     author: viewOf(result),
     // 가입인지 로그인인지. 앱이 온보딩 완료 처리·환영 화면 분기에 쓴다.
     created: result.created,
+    // 처음 보는 신원을 같은 이메일의 기존 계정에 붙였다(signIn 주석). created 와 배타적이다.
+    //  앱은 온보딩을 띄우지 말고 "기존 계정에 연결했습니다" 정도만 알려 주면 된다.
+    linked: result.linked,
+    // 연결하면서 이메일 비밀번호를 지웠다 — 앱이 "비밀번호는 다시 설정해야 한다"고 알려 준다.
+    passwordReset: result.passwordReset,
   };
+}
+
+/** Postgres 유니크 위반(23505). 동시 요청이 같은 신원·이메일을 만들려 할 때 signIn 이 던진다. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23505';
+}
+
+// 409 안내문에 쓰는 로그인 방식 이름.
+const PROVIDER_LABEL: Record<Provider, string> = {
+  email: '이메일', google: '구글', apple: '애플', kakao: '카카오', naver: '네이버',
+};
+
+/**
+ * 이메일 가입이 이미 쓰이는 주소에 부딪혔을 때의 409.
+ *
+ * providers 를 함께 준다 — 구글로만 가입한 사람이 같은 주소로 이메일 가입을 누르면 "이미 가입된
+ * 이메일입니다"만으로는 갈 곳이 없다(이메일 로그인은 비밀번호가 없어 실패한다). 어떤 방식으로
+ * 가입돼 있는지 알아야 앱이 그 버튼으로 안내할 수 있다. 이 경로의 열거 노출은 이미 감수하고
+ * 시도 제한으로 묶고 있다(가입 라우트 주석).
+ */
+function emailTaken(c: Context<AppEnv>, providers: Provider[]) {
+  const social = providers.filter((p) => p !== 'email');
+  const message = providers.includes('email') || social.length === 0
+    ? '이미 가입된 이메일입니다. 로그인해주세요.'
+    : `${social.map((p) => PROVIDER_LABEL[p]).join('·')} 로그인으로 가입된 이메일입니다. 그 방식으로 로그인해주세요.`;
+  return c.json({ error: 'email_taken', message, providers }, 409);
 }
 
 // 같은 목적의 코드를 다시 보내기까지 기다려야 하는 최소 간격(초).
@@ -273,19 +307,30 @@ export function buildAuthRoutes(): Hono<AppEnv> {
 
     // 가입은 "이미 있는 이메일"을 알려줘야 한다 — 안 알려주면 사용자가 가입을 못 한다.
     //  열거를 감수하는 대신 위의 시도 제한으로 속도를 묶는다(중복 응답도 실패로 센다).
-    if (await findEmailIdentity(email)) {
-      return c.json({ error: 'email_taken', message: '이미 가입된 이메일입니다. 로그인해주세요.' }, 409);
-    }
+    //  이메일 신원만이 아니라 구글 등으로 가입한 계정의 대표 주소도 본다(findEmailOwner 주석).
+    //  ⚠️ 소셜 계정에 같은 주소라고 비밀번호를 붙여 주지 않는다 — 이메일 소유를 증명하지 않은
+    //     사람이 남의 계정의 비밀번호를 정하는 셈이 된다. 반대 방향(소셜 → 기존 이메일 계정)만
+    //     자동 연결이고, 그것도 프로바이더가 이메일을 검증했을 때만이다(signIn 주석).
+    const owner = await findEmailOwner(email);
+    if (owner) return emailTaken(c, owner.providers);
 
     const passwordHash = await hashPassword(password);
-    const result = await signIn({
-      identity: { provider: 'email', subject: email, email },
-      deviceId,
-      nickname,
-      passwordHash,
-      accessFeatures,
-      sensitiveConsent: p.sensitiveConsent === true,
-    });
+    let result: SignInResult;
+    try {
+      result = await signIn({
+        identity: { provider: 'email', subject: email, email, emailVerified: false },
+        deviceId,
+        nickname,
+        passwordHash,
+        accessFeatures,
+        sensitiveConsent: p.sensitiveConsent === true,
+      });
+    } catch (error) {
+      // 위 검사와 signIn 사이에 같은 주소의 계정이 생겼다(동시 가입·동시 소셜 로그인).
+      if (error instanceof EmailTakenError) return emailTaken(c, error.providers);
+      if (isUniqueViolation(error)) return emailTaken(c, ['email']);
+      throw error;
+    }
     // 가입 직후 인증 코드를 보낸다. 실패해도 가입은 성공으로 둔다 — 앱에서 재발송할 수 있다.
     await issueAndSend(result.authorId, 'verify', email);
     return c.json(await finishSignIn(result, deviceId), 201);
@@ -403,14 +448,26 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       throw error;
     }
 
-    const result = await signIn({
-      identity: { provider, subject: profile.subject, email: profile.email },
-      deviceId,
-      // 구글·카카오는 토큰에 이름이 있고, 애플은 앱이 보내 준다. 없으면 signIn 이 기본값을 쓴다.
-      nickname: nickname || profile.name || '',
-      accessFeatures,
-      sensitiveConsent: p.sensitiveConsent === true,
-    });
+    let result: SignInResult;
+    try {
+      result = await signIn({
+        // emailVerified 가 같은 이메일의 기존 계정에 붙일지를 정한다(signIn 주석). 구글·애플은
+        //  토큰의 email_verified, 카카오는 확인 수단이 없어 항상 거짓이다(social-tokens.ts).
+        identity: { provider, subject: profile.subject, email: profile.email, emailVerified: profile.emailVerified },
+        deviceId,
+        // 구글·카카오는 토큰에 이름이 있고, 애플은 앱이 보내 준다. 없으면 signIn 이 기본값을 쓴다.
+        nickname: nickname || profile.name || '',
+        accessFeatures,
+        sensitiveConsent: p.sensitiveConsent === true,
+      });
+    } catch (error) {
+      // 같은 신원(또는 같은 주소의 계정)이 그 사이 만들어졌다 — 같은 토큰으로 두 번 눌렀을 때.
+      //  두 번째 시도는 이미 있는 신원을 찾아 그냥 로그인되므로 다시 시도하면 된다.
+      if (isUniqueViolation(error)) {
+        return c.json({ error: 'conflict', message: '요청이 겹쳤습니다. 다시 시도해주세요.' }, 409);
+      }
+      throw error;
+    }
 
     // 프로바이더가 이메일 소유를 확인했다고 말하면 우리 계정도 인증된 것으로 본다 —
     //  그러지 않으면 구글로 가입한 사람에게 앱이 영원히 "이메일 인증 전"을 띄운다.

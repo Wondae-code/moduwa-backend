@@ -7,6 +7,8 @@
 // 규칙 요약(030 이후):
 //   · authors 행은 **로그인 계정에만** 생긴다. 익명 기기가 계정을 만드는 경로는 없다.
 //   · 로그인   — (provider, subject) 로 계정을 찾고, 없으면 만든다. 이 기기를 그 계정에 묶는다.
+//   · 연결     — 처음 보는 신원인데 **검증된 이메일**이 기존 계정의 주소와 같으면, 새 계정을
+//                만들지 않고 그 계정에 신원을 붙인다(signIn 주석의 "같은 이메일" 참고).
 //   · 로그아웃 — 기기 바인딩만 끊는다. 계정과 데이터는 남고 다시 로그인하면 돌아온다.
 //
 // ⚠️ **병합(익명 데이터 이관)은 없다.** 024~029 에는 "deviceId 로 익명 계정을 찾아 승격하거나
@@ -25,6 +27,12 @@ export type VerifiedIdentity = {
   /** 프로바이더가 주는 고유 사용자 ID(OIDC sub). 이메일이 아니라 이 값이 계정의 키다. */
   subject: string;
   email?: string | null;
+  /**
+   * 프로바이더가 이 이메일의 소유를 **확인해 줬는가**(OIDC `email_verified`).
+   * 같은 이메일의 기존 계정에 이 신원을 자동으로 붙일지 결정하는 유일한 근거다.
+   * 구글·애플은 참으로 오고, 카카오는 확인 수단이 없어 거짓, 이메일 가입은 코드 인증 전이라 거짓.
+   */
+  emailVerified?: boolean;
 };
 
 export type SignInResult = {
@@ -34,6 +42,16 @@ export type SignInResult = {
   nickname: string;
   /** 이번 로그인으로 계정이 새로 만들어졌는지(= 가입). 앱이 온보딩 완료 처리에 쓴다. */
   created: boolean;
+  /**
+   * 처음 보는 신원을 **같은 이메일의 기존 계정에 붙였다.** created 와 배타적이다 — 계정은
+   * 이미 있었으니 온보딩을 다시 띄우면 안 되고, 앱이 "기존 계정에 연결했다"고 알려 줄 수 있다.
+   */
+  linked: boolean;
+  /**
+   * 연결하면서 기존 계정의 **이메일 비밀번호를 지웠다.** 기존 계정이 이메일 인증을 마치지
+   * 않은 상태였을 때만 참이다(signIn 주석). 앱이 "비밀번호는 다시 설정해야 한다"고 알려 준다.
+   */
+  passwordReset: boolean;
   email: string | null;
   emailVerified: boolean;
   /** 온보딩에서 고른 무장애 항목(030). 앱이 로컬 값과 맞추는 데 쓴다. */
@@ -57,6 +75,43 @@ const FALLBACK_NICKNAME = '여행자';
  */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/**
+ * 이메일 가입이 **이미 쓰이는 주소**에 부딪혔다. 라우트가 409 `email_taken` 으로 바꾼다.
+ * providers 는 그 계정이 가진 로그인 방식이다 — 구글로만 가입한 사람이 같은 주소로 이메일
+ * 가입을 누르면 "구글로 로그인하라"고 안내해야 하고, 그러려면 방식이 무엇인지 알아야 한다.
+ */
+export class EmailTakenError extends Error {
+  constructor(public readonly providers: Provider[]) {
+    super('email already in use');
+  }
+}
+
+/**
+ * 이 이메일을 쓰는 **살아 있는 계정**과 그 계정의 로그인 방식. 없으면 null.
+ *
+ * 두 자리를 다 본다 — 이메일 신원(author_identities)과 계정 대표 주소(authors.email).
+ * 이메일 신원만 보면 구글로 가입한 계정의 주소를 놓쳐서, 같은 주소로 이메일 가입이
+ * 통과된 뒤 authors.email 유니크 인덱스에서 500 으로 터진다.
+ */
+export async function findEmailOwner(
+  email: string,
+): Promise<{ authorId: number; providers: Provider[] } | null> {
+  const row = (await query<{ id: number; providers: Provider[] }>(
+    `select a.id, array_remove(array_agg(distinct i.provider), null) as providers
+       from authors a
+       left join author_identities i on i.author_id = a.id
+      where a.deleted_at is null
+        and (lower(a.email) = $1
+             or exists (select 1 from author_identities e
+                         where e.author_id = a.id and e.provider = 'email' and e.subject = $1))
+      group by a.id
+      order by a.id
+      limit 1`,
+    [normalizeEmail(email)],
+  )).rows[0];
+  return row ? { authorId: row.id, providers: row.providers } : null;
 }
 
 /** 이메일 신원 조회 — 로그인 시 비밀번호를 대조하기 위한 것. 없으면 null. */
@@ -109,6 +164,20 @@ export async function bindDevice(
  *
  * 그래서 **deviceId 는 신원 근거가 아니다.** 여기서의 용도는 "이 계정이 지금 이 기기를
  * 쓴다"는 기록 하나뿐이고, 그 기록으로 남의 데이터에 닿을 수 있는 경로는 없다.
+ *
+ * **같은 이메일의 기존 계정** — 처음 보는 신원인데 그 이메일을 쓰는 살아 있는 계정이 있으면:
+ *   · 프로바이더가 이메일 소유를 확인해 줬다(emailVerified) → 새 계정을 만들지 않고 그 계정에
+ *     이 신원을 **붙인다**(linked). 이메일로 가입한 사람이 나중에 구글로 들어와도 같은 계정이다.
+ *     - 기존 계정이 우리 이메일 인증을 마쳤으면 그대로 붙인다.
+ *     - 마치지 않았으면 붙이되 **이메일 비밀번호를 지우고 세션을 전부 끊는다**(passwordReset).
+ *       남의 주소로 이메일 가입만 해 두고(인증은 못 한다) 비밀번호를 쥔 채 기다리는 선점 탈취를
+ *       막기 위해서다 — 주소의 진짜 주인이 구글로 들어오는 순간 그 비밀번호는 무효가 된다.
+ *       진짜 주인은 구글로 쓰거나, 비밀번호 찾기(그 주소로 코드가 간다)로 새로 정하면 된다.
+ *   · 확인해 주지 않았고 이메일 가입이다 → EmailTakenError. 이메일 소유를 증명하지 않은 채
+ *     남의 계정에 비밀번호를 붙이게 되므로 절대 붙이지 않는다(라우트가 409 로 안내한다).
+ *   · 확인해 주지 않았고 소셜이다(카카오) → 별도 계정을 만들되 **대표 이메일은 비워 둔다.**
+ *     붙일 근거가 없고, 주소를 채우면 유니크 인덱스에서 터진다. 신원 행의 email 에는 남는다.
+ * 애플 비공개 릴레이 주소는 기존 주소와 같을 수 없으므로 자연히 연결되지 않는다.
  */
 export async function signIn(params: {
   identity: VerifiedIdentity;
@@ -137,6 +206,11 @@ export async function signIn(params: {
 
     let authorId: number;
     let created = false;
+    let linked = false;
+    let passwordReset = false;
+    // 이 신원의 이메일을 계정 대표 주소로 올려도 되는가. 같은 주소의 다른 계정이 있는데
+    //  붙일 근거가 없으면(카카오) 거짓 — 채우면 idx_authors_email 에서 트랜잭션이 터진다.
+    let claimEmail = Boolean(identity.email);
 
     if (existing) {
       authorId = existing.author_id;
@@ -146,23 +220,65 @@ export async function signIn(params: {
         [identity.provider, identity.subject, identity.email ?? null],
       );
     } else {
-      // 새 계정. authors.device_id 는 채우지 않는다 — 바인딩은 author_devices 가 맡는다.
-      //  onboarded_at 은 accessFeatures 가 실려 왔을 때만 찍는다. 빈 배열만으로는
-      //  "아무것도 고르지 않았다"와 "온보딩을 안 했다"를 구분할 수 없다(030 주석).
-      // ⚠️ 민감정보 동의는 값이 실제로 있을 때만 찍는다. 빈 배열에 동의 기록을 남기면,
-      //    나중에 값을 채울 때 묻지 않고 저장하게 된다(050).
-      const consented = Boolean(params.sensitiveConsent) && (params.accessFeatures ?? []).length > 0;
-      authorId = (await client.query<{ id: number }>(
-        `insert into authors (nickname, access_features, onboarded_at,
-                              sensitive_consent_at, sensitive_consent_ver)
-         values ($1, $2, case when $3::boolean then now() else null end,
-                 case when $4::boolean then now() else null end,
-                 case when $4::boolean then $5 else null end)
-         returning id`,
-        [nickname || FALLBACK_NICKNAME, params.accessFeatures ?? [], params.accessFeatures != null,
-         consented, SENSITIVE_NOTICE_VERSION],
-      )).rows[0]!.id;
-      created = true;
+      // 처음 보는 신원. 같은 이메일을 쓰는 살아 있는 계정이 있는지 먼저 본다(함수 주석).
+      //  for update — 같은 주소로 두 신원이 동시에 들어와도 한 번에 하나만 붙는다.
+      //  탈퇴 계정은 email 이 이미 null 이지만, deleted_at 조건을 겹쳐 두어 의도를 남긴다.
+      const owner = identity.email
+        ? (await client.query<{ id: number; verified: Date | null }>(
+            `select id, email_verified_at as verified from authors
+              where lower(email) = $1 and deleted_at is null
+              for update`,
+            [normalizeEmail(identity.email)],
+          )).rows[0]
+        : undefined;
+
+      if (owner && identity.emailVerified) {
+        // 검증된 이메일 → 기존 계정에 붙인다. 닉네임·접근성 항목은 기존 계정 것을 지킨다.
+        authorId = owner.id;
+        linked = true;
+
+        if (owner.verified == null) {
+          // 기존 계정은 이 주소의 소유를 증명한 적이 없고, 지금 들어온 쪽은 증명했다.
+          //  비밀번호를 쥔 사람이 진짜 주인이라는 보장이 없으므로 비밀번호를 무효화하고
+          //  세션도 전부 끊는다(함수 주석의 선점 탈취). 주인이면 비밀번호 찾기로 복구된다.
+          await client.query(
+            `update author_identities set password_hash = null, updated_at = now()
+              where author_id = $1 and provider = 'email' and password_hash is not null`,
+            [authorId],
+          );
+          await client.query(
+            'update author_sessions set revoked_at = now() where author_id = $1 and revoked_at is null',
+            [authorId],
+          );
+          passwordReset = true;
+        }
+      } else if (owner && identity.provider === 'email') {
+        // 이메일 가입인데 주소가 이미 쓰인다. 라우트가 미리 걸러 주지만 그 사이 생겼을 수 있다.
+        const providers = (await client.query<{ provider: Provider }>(
+          'select distinct provider from author_identities where author_id = $1 order by provider',
+          [owner.id],
+        )).rows.map((r) => r.provider);
+        throw new EmailTakenError(providers);
+      } else {
+        // 새 계정. authors.device_id 는 채우지 않는다 — 바인딩은 author_devices 가 맡는다.
+        //  onboarded_at 은 accessFeatures 가 실려 왔을 때만 찍는다. 빈 배열만으로는
+        //  "아무것도 고르지 않았다"와 "온보딩을 안 했다"를 구분할 수 없다(030 주석).
+        // ⚠️ 민감정보 동의는 값이 실제로 있을 때만 찍는다. 빈 배열에 동의 기록을 남기면,
+        //    나중에 값을 채울 때 묻지 않고 저장하게 된다(050).
+        if (owner) claimEmail = false; // 미검증 소셜 이메일이 남의 주소와 겹친다 — 대표 주소로 올리지 않는다.
+        const consented = Boolean(params.sensitiveConsent) && (params.accessFeatures ?? []).length > 0;
+        authorId = (await client.query<{ id: number }>(
+          `insert into authors (nickname, access_features, onboarded_at,
+                                sensitive_consent_at, sensitive_consent_ver)
+           values ($1, $2, case when $3::boolean then now() else null end,
+                   case when $4::boolean then now() else null end,
+                   case when $4::boolean then $5 else null end)
+           returning id`,
+          [nickname || FALLBACK_NICKNAME, params.accessFeatures ?? [], params.accessFeatures != null,
+           consented, SENSITIVE_NOTICE_VERSION],
+        )).rows[0]!.id;
+        created = true;
+      }
 
       // on conflict 를 쓰지 않는다 — 충돌은 "그 사이 같은 신원이 만들어졌다"는 뜻이고,
       //  그때 author_id 를 덮어쓰면 뒤에 온 요청이 앞 요청의 신원을 가져간다.
@@ -176,7 +292,7 @@ export async function signIn(params: {
 
     // 계정 대표 이메일은 비어 있을 때만 채운다. 사용자가 직접 바꾼 주소를 소셜 응답이
     // 덮어쓰면 안 되고, 애플처럼 최초 1회만 주는 프로바이더도 있어 null 로 지워질 위험이 있다.
-    if (identity.email) {
+    if (claimEmail) {
       await client.query(
         'update authors set email = coalesce(email, $2) where id = $1',
         [authorId, identity.email],
@@ -199,7 +315,7 @@ export async function signIn(params: {
       [authorId],
     )).rows[0]!;
     return {
-      authorId, uuid: row.uuid, nickname: row.nickname, created,
+      authorId, uuid: row.uuid, nickname: row.nickname, created, linked, passwordReset,
       email: row.email, emailVerified: row.verified != null,
       accessFeatures: row.access_features, onboarded: row.onboarded_at != null,
       avatarUrl: row.avatar_url,
