@@ -13,6 +13,7 @@ import { config } from '../config';
 import { query, withTransaction } from '../db';
 import {
   EmailTakenError,
+  LinkRequiredError,
   type Provider,
   type SignInResult,
   findEmailIdentity,
@@ -483,8 +484,22 @@ export function buildAuthRoutes(): Hono<AppEnv> {
         nickname: nickname || profile.name || '',
         accessFeatures,
         sensitiveConsent: p.sensitiveConsent === true,
+        // 카카오처럼 미검증 이메일이 기존 계정과 겹칠 때 "그래도 새 계정" 을 고른 재요청.
+        newAccount: p.newAccount === true,
       });
     } catch (error) {
+      if (error instanceof LinkRequiredError) {
+        // 같은 주소의 계정이 있는데 이 프로바이더는 이메일을 검증해 주지 않아 자동으로 붙일 수 없다.
+        //  앱이 묻는다 — "기존 계정에 연결" 이면 그 계정으로 로그인한 뒤 이 idToken 을
+        //  POST /me/identities 로 보내고, "새 계정으로 시작" 이면 newAccount: true 로 다시 보낸다.
+        const social = error.providers.filter((q) => q !== 'email').map((q) => PROVIDER_LABEL[q]);
+        const how = [...(error.providers.includes('email') ? ['이메일'] : []), ...social].join('·');
+        return c.json({
+          error: 'link_required',
+          message: `이 이메일로 가입된 계정이 있습니다(${how} 로그인). 기존 계정에 연결하거나 새 계정으로 시작할 수 있습니다.`,
+          providers: error.providers,
+        }, 409);
+      }
       // 같은 신원(또는 같은 주소의 계정)이 그 사이 만들어졌다 — 같은 토큰으로 두 번 눌렀을 때.
       //  두 번째 시도는 이미 있는 신원을 찾아 그냥 로그인되므로 다시 시도하면 된다.
       if (isUniqueViolation(error)) {

@@ -89,6 +89,18 @@ export class EmailTakenError extends Error {
 }
 
 /**
+ * 미검증 소셜 이메일(카카오)이 **기존 계정의 주소와 같다.** 자동으로 붙일 근거는 없고, 말없이
+ * 별도 계정을 만들면 사용자는 후기·플랜이 빈 계정을 보게 된다. 그래서 앱에 한 번 묻게 한다 —
+ * 기존 계정으로 로그인한 뒤 연결(POST /me/identities)하거나, newAccount 로 새로 시작하거나.
+ * 라우트가 409 `link_required` 로 바꾼다.
+ */
+export class LinkRequiredError extends Error {
+  constructor(public readonly providers: Provider[]) {
+    super('email belongs to an existing account');
+  }
+}
+
+/**
  * 이 이메일을 쓰는 **살아 있는 계정**과 그 계정의 로그인 방식. 없으면 null.
  *
  * 두 자리를 다 본다 — 이메일 신원(author_identities)과 계정 대표 주소(authors.email).
@@ -175,8 +187,10 @@ export async function bindDevice(
  *       진짜 주인은 구글로 쓰거나, 비밀번호 찾기(그 주소로 코드가 간다)로 새로 정하면 된다.
  *   · 확인해 주지 않았고 이메일 가입이다 → EmailTakenError. 이메일 소유를 증명하지 않은 채
  *     남의 계정에 비밀번호를 붙이게 되므로 절대 붙이지 않는다(라우트가 409 로 안내한다).
- *   · 확인해 주지 않았고 소셜이다(카카오) → 별도 계정을 만들되 **대표 이메일은 비워 둔다.**
- *     붙일 근거가 없고, 주소를 채우면 유니크 인덱스에서 터진다. 신원 행의 email 에는 남는다.
+ *   · 확인해 주지 않았고 소셜이다(카카오) → LinkRequiredError. 앱이 "기존 계정에 연결할지, 새로
+ *     시작할지" 묻는다. 연결은 기존 계정으로 로그인한 뒤 linkIdentity 로, 새로 시작은 newAccount 로
+ *     다시 부른다 — 그때는 별도 계정을 만들되 **대표 이메일은 비워 둔다**(붙일 근거가 없고, 주소를
+ *     채우면 유니크 인덱스에서 터진다. 신원 행의 email 에는 남는다).
  * 애플 비공개 릴레이 주소는 기존 주소와 같을 수 없으므로 자연히 연결되지 않는다.
  */
 export async function signIn(params: {
@@ -194,6 +208,12 @@ export async function signIn(params: {
   accessFeatures?: string[];
   /** 민감정보(접근성 특성) 수집·이용 동의. accessFeatures 가 비어 있지 않을 때만 의미가 있다. */
   sensitiveConsent?: boolean;
+  /**
+   * 미검증 소셜 이메일이 기존 계정과 겹칠 때 **그래도 새 계정을 만들라**는 사용자의 선택.
+   * 없으면 LinkRequiredError 를 던져 앱이 묻게 한다(클래스 주석). 참이면 별도 계정을 만들되
+   * 대표 이메일은 비워 둔다.
+   */
+  newAccount?: boolean;
 }): Promise<SignInResult> {
   const { identity, deviceId } = params;
   const nickname = (params.nickname ?? '').trim();
@@ -252,13 +272,15 @@ export async function signIn(params: {
           );
           passwordReset = true;
         }
-      } else if (owner && identity.provider === 'email') {
-        // 이메일 가입인데 주소가 이미 쓰인다. 라우트가 미리 걸러 주지만 그 사이 생겼을 수 있다.
+      } else if (owner && (identity.provider === 'email' || !params.newAccount)) {
+        // 주소가 이미 쓰이는데 붙일 근거가 없다.
+        //  · 이메일 가입 — 라우트가 미리 걸러 주지만 그 사이 생겼을 수 있다 → EmailTakenError.
+        //  · 미검증 소셜(카카오) — 사용자가 아직 고르지 않았다 → LinkRequiredError(클래스 주석).
         const providers = (await client.query<{ provider: Provider }>(
           'select distinct provider from author_identities where author_id = $1 order by provider',
           [owner.id],
         )).rows.map((r) => r.provider);
-        throw new EmailTakenError(providers);
+        throw identity.provider === 'email' ? new EmailTakenError(providers) : new LinkRequiredError(providers);
       } else {
         // 새 계정. authors.device_id 는 채우지 않는다 — 바인딩은 author_devices 가 맡는다.
         //  onboarded_at 은 accessFeatures 가 실려 왔을 때만 찍는다. 빈 배열만으로는
