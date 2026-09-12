@@ -30,7 +30,7 @@ import {
   signOutDevice,
 } from './accounts';
 import { type CodePurpose, consumeCode, issueCode, secondsSinceLastCode } from './email-codes';
-import { buildCodeMail, sendMail } from './mailer';
+import { buildCodeMail, buildPasswordResetNoticeMail, sendMail } from './mailer';
 import {
   MAX_PASSWORD_LENGTH,
   burnVerifyTime,
@@ -514,6 +514,13 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     //  주소를 바꿨으면 소셜 응답이 그것을 인증해 줄 근거가 없다).
     if (profile.email && profile.emailVerified) {
       await markEmailVerified(result.authorId, profile.email);
+    }
+
+    // 자동 연결하면서 이메일 비밀번호를 지웠다 — 주소의 주인에게 알린다(mailer 주석).
+    //  받는 주소는 계정의 대표 이메일이다. 연결 조건상 프로바이더가 준 주소와 같다.
+    //  실패해도 로그인을 막지 않는다(sendMail 규칙). 앱에는 passwordReset 으로 이미 알렸다.
+    if (result.passwordReset && result.email) {
+      await sendMail({ to: result.email, ...buildPasswordResetNoticeMail(PROVIDER_LABEL[provider]) });
     }
 
     // 애플 refresh token 을 받아 둔다 — **계정 삭제 때만 쓴다.**
