@@ -17,7 +17,10 @@ import {
   type SignInResult,
   findEmailIdentity,
   findEmailOwner,
+  linkIdentity,
+  listIdentities,
   markEmailVerified,
+  unlinkIdentity,
   setAccessFeatures,
   normalizeEmail,
   setEmailPassword,
@@ -184,6 +187,44 @@ function emailTaken(c: Context<AppEnv>, providers: Provider[]) {
     ? '이미 가입된 이메일입니다. 로그인해주세요.'
     : `${social.map((p) => PROVIDER_LABEL[p]).join('·')} 로그인으로 가입된 이메일입니다. 그 방식으로 로그인해주세요.`;
   return c.json({ error: 'email_taken', message, providers }, 409);
+}
+
+type SocialProvider = 'google' | 'apple' | 'kakao';
+const SOCIAL_VERIFIERS: Record<SocialProvider, (idToken: string) => Promise<SocialProfile>> = {
+  google: verifyGoogleIdToken, apple: verifyAppleIdToken, kakao: verifyKakaoIdToken,
+};
+function isSocialProvider(v: unknown): v is SocialProvider {
+  return v === 'google' || v === 'apple' || v === 'kakao';
+}
+
+/**
+ * 소셜 ID 토큰을 검증하고, 실패하면 **응답을 만들어 돌려준다.** 로그인과 계정 연결이 같은
+ * 실패 처리를 써야 해서 한곳에 둔다 — 미설정은 503, 토큰 불량은 401 + 시도 카운트.
+ */
+async function verifySocialOrRespond(
+  c: Context<AppEnv>,
+  provider: SocialProvider,
+  verifyToken: (idToken: string) => Promise<SocialProfile>,
+  idToken: string,
+): Promise<SocialProfile | Response> {
+  try {
+    return await verifyToken(idToken);
+  } catch (error) {
+    if (error instanceof SocialNotConfiguredError) {
+      // 앱 잘못이 아니다. 서버가 클라이언트 ID 를 모르면 검증 자체를 할 수 없고,
+      //  그 상태로 통과시키면 남의 앱 토큰까지 받아 준다(social-tokens.ts 상단).
+      console.error(`[social] ${provider} 미설정 — 거부:`, (error as Error).message);
+      return c.json({
+        error: 'social_not_configured',
+        message: '지금은 이 방식으로 로그인할 수 없습니다. 이메일로 로그인해주세요.',
+      }, 503);
+    }
+    recordAttempt(c);
+    if (error instanceof SocialTokenError) {
+      return c.json({ error: 'invalid_token', message: '로그인 정보를 확인할 수 없습니다. 다시 시도해주세요.' }, 401);
+    }
+    throw error;
+  }
 }
 
 // 같은 목적의 코드를 다시 보내기까지 기다려야 하는 최소 간격(초).
@@ -428,25 +469,8 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       return c.json({ error: 'invalid_deviceId', message: `deviceId 는 ${MAX_DEVICE_ID_LENGTH}자 이하여야 합니다.` }, 400);
     }
 
-    let profile: SocialProfile;
-    try {
-      profile = await verifyToken(idToken);
-    } catch (error) {
-      if (error instanceof SocialNotConfiguredError) {
-        // 앱 잘못이 아니다. 서버가 클라이언트 ID 를 모르면 검증 자체를 할 수 없고,
-        //  그 상태로 통과시키면 남의 앱 토큰까지 받아 준다(social-tokens.ts 상단).
-        console.error(`[social] ${provider} 미설정 — 로그인 거부:`, (error as Error).message);
-        return c.json({
-          error: 'social_not_configured',
-          message: '지금은 이 방식으로 로그인할 수 없습니다. 이메일로 로그인해주세요.',
-        }, 503);
-      }
-      recordAttempt(c);
-      if (error instanceof SocialTokenError) {
-        return c.json({ error: 'invalid_token', message: '로그인 정보를 확인할 수 없습니다. 다시 시도해주세요.' }, 401);
-      }
-      throw error;
-    }
+    const profile = await verifySocialOrRespond(c, provider, verifyToken, idToken);
+    if (profile instanceof Response) return profile;
 
     let result: SignInResult;
     try {
@@ -639,6 +663,101 @@ export function buildAuthRoutes(): Hono<AppEnv> {
     const view = await loadAuthorView(authorId);
     if (!view) return c.json({ error: 'not_found', message: '계정을 찾을 수 없습니다.' }, 404);
     return c.json(view);
+  });
+
+  // ── 연결된 계정 (설정 화면) ─────────────────────────────────────────────────
+  //  로그인 상태에서 다른 로그인 방식을 붙이고 뗀다. signIn 의 자동 연결이 못 덮는 경우 —
+  //  카카오(이메일 미검증), 애플 "이메일 가리기"(주소가 다름), 이메일 계정에 구글을 나중에 —
+  //  를 위한 것이다. 근거는 이메일이 아니라 **지금 세션이 이 계정의 주인**이라는 사실이다.
+  auth.get('/me/identities', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'unauthenticated', message: '로그인 상태가 아닙니다.' }, 401);
+    return c.json({ identities: await listIdentities(authorId) });
+  });
+
+  auth.post('/me/identities', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'unauthenticated', message: '로그인 상태가 아닙니다.' }, 401);
+    // 토큰 검증은 남의 서버(JWKS)를 때리는 경로다 — 로그인과 같은 창으로 묶는다.
+    if (tooManyAttempts(c)) {
+      return c.json({ error: 'too_many_attempts', message: '요청이 많습니다. 잠시 후 다시 시도해주세요.' }, 429);
+    }
+
+    const p = await readBody(c);
+    if (!p) return c.json({ error: 'invalid_body', message: 'JSON 객체를 보내주세요.' }, 400);
+    const provider = p.provider;
+    if (!isSocialProvider(provider)) {
+      return c.json({ error: 'invalid_provider', message: 'provider 는 google · apple · kakao 중 하나여야 합니다.' }, 400);
+    }
+    const idToken = str(p.idToken);
+    if (!idToken) return c.json({ error: 'missing_idToken', message: '로그인 토큰이 없습니다.' }, 400);
+    // 애플만 — 계정 삭제·연결 해제 때 폐기하려면 refresh token 이 필요하다(소셜 로그인과 같다).
+    const authorizationCode = provider === 'apple' ? str(p.authorizationCode) : '';
+
+    const profile = await verifySocialOrRespond(c, provider, SOCIAL_VERIFIERS[provider], idToken);
+    if (profile instanceof Response) return profile;
+
+    const result = await linkIdentity(authorId, {
+      provider, subject: profile.subject, email: profile.email, emailVerified: profile.emailVerified,
+    });
+    if (result.status === 'identity_in_use') {
+      // 합치지 않는다(linkIdentity 주석). 그 계정으로 로그인하라고만 안내한다.
+      return c.json({
+        error: 'identity_in_use',
+        message: `이 ${PROVIDER_LABEL[provider]} 계정은 이미 다른 모두와 계정에 연결되어 있습니다. 그 계정으로 로그인해주세요.`,
+      }, 409);
+    }
+    if (result.status === 'provider_already_linked') {
+      return c.json({
+        error: 'provider_already_linked',
+        message: `${PROVIDER_LABEL[provider]} 계정이 이미 연결되어 있습니다. 먼저 연결을 해제해주세요.`,
+      }, 409);
+    }
+
+    if (result.status === 'linked' && authorizationCode) {
+      // 실패해도 연결을 막지 않는다(소셜 로그인의 같은 자리 주석).
+      const refresh = await exchangeAppleCode(authorizationCode);
+      if (refresh) {
+        await query(
+          `update author_identities set refresh_token = $3, updated_at = now()
+            where provider = 'apple' and subject = $1 and author_id = $2`,
+          [profile.subject, authorId, refresh],
+        );
+      }
+    }
+
+    return c.json({
+      linked: result.status === 'linked',
+      // 같은 소셜 계정을 다시 붙이는 것은 오류가 아니다 — 두 번 눌렀을 뿐이다.
+      alreadyLinked: result.status === 'already_linked',
+      identities: await listIdentities(authorId),
+      author: await loadAuthorView(authorId),
+    });
+  });
+
+  auth.delete('/me/identities/:provider', async (c) => {
+    const authorId = c.get('authorId');
+    if (authorId == null) return c.json({ error: 'unauthenticated', message: '로그인 상태가 아닙니다.' }, 401);
+    const provider = c.req.param('provider');
+    // 이메일 신원도 뗄 수 있다 — 소셜만 남기고 싶은 사람. 마지막 하나만 아니면 된다.
+    if (!isSocialProvider(provider) && provider !== 'email') {
+      return c.json({ error: 'invalid_provider', message: '알 수 없는 로그인 방식입니다.' }, 400);
+    }
+
+    const result = await unlinkIdentity(authorId, provider);
+    if (result.status === 'not_linked') {
+      return c.json({ error: 'not_linked', message: '연결되어 있지 않은 로그인 방식입니다.' }, 404);
+    }
+    if (result.status === 'last_identity') {
+      return c.json({
+        error: 'last_identity',
+        message: '마지막 남은 로그인 방식은 해제할 수 없습니다. 다른 방식을 먼저 연결해주세요.',
+      }, 409);
+    }
+    // 애플 설정의 "Apple 로 로그인" 목록에서 우리 앱을 지운다. 실패해도 해제는 끝난 것이다.
+    if (result.appleRefreshToken) await revokeApple(result.appleRefreshToken);
+
+    return c.json({ identities: await listIdentities(authorId) });
   });
 
   // ── 무장애 프로필 수정 ─────────────────────────────────────────────────────

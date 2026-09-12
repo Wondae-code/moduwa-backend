@@ -325,6 +325,123 @@ export async function signIn(params: {
   });
 }
 
+// ── 로그인 상태에서의 신원 연결·해제 ──────────────────────────────────────────
+//  signIn 의 자동 연결은 "프로바이더가 검증한 이메일이 같다"가 근거였다. 여기서는 근거가
+//  다르다 — **지금 세션이 이 계정의 주인이다.** 그래서 이메일이 달라도(카카오, 애플 이메일
+//  가리기) 붙일 수 있고, 이메일 검증 여부는 대표 이메일을 채울지에만 쓰인다.
+
+export type LinkedIdentity = { provider: Provider; email: string | null; linkedAt: string };
+
+/** 이 계정에 붙은 로그인 방식. 설정 화면의 "연결된 계정" 이 쓴다. */
+export async function listIdentities(authorId: number): Promise<LinkedIdentity[]> {
+  const rows = (await query<{ provider: Provider; email: string | null; created_at: Date }>(
+    'select provider, email, created_at from author_identities where author_id = $1 order by created_at',
+    [authorId],
+  )).rows;
+  return rows.map((r) => ({ provider: r.provider, email: r.email, linkedAt: r.created_at.toISOString() }));
+}
+
+export type LinkResult =
+  | { status: 'linked' | 'already_linked' }
+  /** 이 소셜 계정이 **다른** 모두와 계정에 이미 붙어 있다. 병합은 하지 않는다(아래 주석). */
+  | { status: 'identity_in_use' }
+  /** 이 계정에 같은 프로바이더가 이미 붙어 있다(구글 계정 두 개는 허용하지 않는다). */
+  | { status: 'provider_already_linked' };
+
+/**
+ * 검증된 소셜 신원을 **지금 로그인한 계정**에 붙인다.
+ *
+ * ⚠️ 그 신원이 이미 다른 계정의 것이면 **붙이지도, 합치지도 않는다**(identity_in_use).
+ *    두 계정을 합치는 것은 후기·플랜·좋아요의 소유자를 옮기는 일이라 별도 설계가 필요하고,
+ *    여기서 조용히 하면 "카카오를 눌렀더니 다른 계정이 내 계정에 흡수됐다"가 된다.
+ *    사용자에게는 "그 카카오 계정은 다른 모두와 계정에 연결되어 있다"고 알리는 것이 맞다.
+ *
+ * 대표 이메일은 **비어 있고, 다른 살아 있는 계정이 그 주소를 쓰지 않을 때만** 채운다 —
+ * 채우다 유니크 인덱스에 걸리면 연결 전체가 실패하는데, 주소는 연결의 본질이 아니다.
+ * 프로바이더가 검증한 주소를 채웠으면 인증 표시도 함께 찍는다.
+ */
+export async function linkIdentity(authorId: number, identity: VerifiedIdentity): Promise<LinkResult> {
+  return withTransaction(async (client) => {
+    // 이 계정 행을 잠근다 — 같은 계정에 두 연결 요청이 겹쳐도 하나씩 처리된다.
+    const me = (await client.query<{ email: string | null }>(
+      'select email from authors where id = $1 and deleted_at is null for update',
+      [authorId],
+    )).rows[0];
+    if (!me) return { status: 'identity_in_use' }; // 탈퇴 계정 — 세션이 남아 있을 리 없지만 방어한다.
+
+    const existing = (await client.query<{ author_id: number }>(
+      'select author_id from author_identities where provider = $1 and subject = $2',
+      [identity.provider, identity.subject],
+    )).rows[0];
+    if (existing) return { status: existing.author_id === authorId ? 'already_linked' : 'identity_in_use' };
+
+    const sameProvider = (await client.query(
+      'select 1 from author_identities where author_id = $1 and provider = $2',
+      [authorId, identity.provider],
+    )).rowCount ?? 0;
+    if (sameProvider > 0) return { status: 'provider_already_linked' };
+
+    await client.query(
+      `insert into author_identities (author_id, provider, subject, email)
+       values ($1, $2, $3, $4)`,
+      [authorId, identity.provider, identity.subject, identity.email ?? null],
+    );
+
+    if (!me.email && identity.email) {
+      const email = normalizeEmail(identity.email);
+      const taken = (await client.query(
+        'select 1 from authors where lower(email) = $1 and deleted_at is null and id <> $2',
+        [email, authorId],
+      )).rowCount ?? 0;
+      if (taken === 0) {
+        await client.query(
+          `update authors set email = $2,
+                  email_verified_at = case when $3::boolean then now() else email_verified_at end
+            where id = $1`,
+          [authorId, identity.email, Boolean(identity.emailVerified)],
+        );
+      }
+    }
+    return { status: 'linked' };
+  });
+}
+
+export type UnlinkResult =
+  | { status: 'unlinked'; appleRefreshToken: string | null }
+  | { status: 'not_linked' }
+  /** 마지막 남은 로그인 방식은 뗄 수 없다 — 떼면 이 계정에 다시 들어올 길이 없다. */
+  | { status: 'last_identity' };
+
+/**
+ * 로그인 방식 하나를 뗀다.
+ *
+ * 애플이면 폐기용 refresh token 을 **돌려준다** — 호출부가 애플에 폐기를 요청해야 애플 설정의
+ * "Apple 로 로그인" 목록에서 우리 앱이 사라진다(계정 삭제와 같은 규칙, apple-auth.ts 상단).
+ * 폐기가 DB 삭제보다 뒤인 것은 감수한다 — 여기서는 신원 행이 사라져도 사용자가 다시 애플로
+ * 로그인하면 새 신원으로 붙을 뿐이고(자동 연결 또는 새 계정), 폐기 실패의 피해는 설정 목록에
+ * 항목이 남는 것뿐이다.
+ */
+export async function unlinkIdentity(authorId: number, provider: Provider): Promise<UnlinkResult> {
+  return withTransaction(async (client) => {
+    await client.query('select 1 from authors where id = $1 for update', [authorId]);
+    const rows = (await client.query<{ provider: Provider; refresh_token: string | null }>(
+      'select provider, refresh_token from author_identities where author_id = $1',
+      [authorId],
+    )).rows;
+    const target = rows.find((r) => r.provider === provider);
+    if (!target) return { status: 'not_linked' };
+    // 같은 프로바이더 행이 둘일 수도 있다(자동 연결이 같은 주소의 다른 구글 계정을 붙인 경우).
+    //  "남는 것"은 다른 프로바이더 기준으로 세야 떼고 나서 0 이 되는 일이 없다.
+    if (!rows.some((r) => r.provider !== provider)) return { status: 'last_identity' };
+
+    await client.query(
+      'delete from author_identities where author_id = $1 and provider = $2',
+      [authorId, provider],
+    );
+    return { status: 'unlinked', appleRefreshToken: provider === 'apple' ? target.refresh_token : null };
+  });
+}
+
 /** 이메일 신원의 비밀번호를 바꾼다(재설정). provider='email' 행만 대상이다. */
 export async function setEmailPassword(authorId: number, passwordHash: string): Promise<void> {
   await query(
