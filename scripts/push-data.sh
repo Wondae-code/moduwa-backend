@@ -68,15 +68,25 @@ docker exec moduwa-postgres pg_dump -U moduwa -d moduwa \
   --no-owner --no-acl --clean --if-exists -t pet_friendly_view > "$DUMP"
 psql_target -1 < "$DUMP" | tail -1
 
+# ④ 검증 — **$TABLES 에서 만든다.** 예전에는 표를 손으로 적어 뒀는데, 목록이 10개로 늘어도
+#    검증은 7개에 멈춰 있었다. 빠진 넷 중에 tats_region_daily 가 있었고, 그 테이블이
+#    실제로 낡은 채 방치돼 추천의 혼잡도가 통째로 죽어 있었다(2026-09-16). 로그는 그동안
+#    매일 "✅ 동기화 완료" 를 찍었다 — 검증하지 않는 것은 조용히 틀린다.
+#    목록에서 만들면 TABLES 에 테이블을 더하는 것만으로 검증도 따라온다.
 echo "④ 검증 (행 수)"
+VERIFY=""
+for t in $TABLES pet_friendly_view; do
+  [ -n "$VERIFY" ] && VERIFY="$VERIFY union all "
+  VERIFY="$VERIFY select '$t' t, count(*) n from $t"
+done
+psql_target -c "$VERIFY order by 1;"
+
+# 날짜가 있는 테이블은 행 수만으로는 낡은 것을 못 잡는다 — 최신 날짜까지 함께 본다.
+echo "④-2 혼잡도 집계 최신성 (추천이 이 범위 밖 날짜는 보정하지 않는다)"
 psql_target -c "
-  select 'pet_tour_poi' t, count(*) n from pet_tour_poi
-  union all select 'pet_tour_detail', count(*) from pet_tour_detail
-  union all select 'kor_with_detail', count(*) from kor_with_detail
-  union all select 'kor_detail', count(*) from kor_detail
-  union all select 'locgo_hub_detail', count(*) from locgo_hub_detail
-  union all select 'pet_friendly_view', count(*) from pet_friendly_view
-  union all select 'barrier_free', count(*) from barrier_free;"
+  select min(base_ymd) frm, max(base_ymd) too,
+         count(*) filter (where base_ymd >= to_char(now(), 'YYYYMMDD')) as future_rows
+    from tats_region_daily;"
 
 # reviews/authors 는 동기화 대상이 아니다 — prod 값을 그대로 보여주기만 한다(변화가 없어야 정상).
 echo "⑤ 동기화 제외 테이블 현황 (prod 소스 — 이 값은 변하지 않아야 한다)"
