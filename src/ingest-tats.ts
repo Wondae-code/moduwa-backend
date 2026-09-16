@@ -7,6 +7,7 @@ import { config } from './config';
 import { DailyLimitError, fetchApi, isSuccess, type ApiItem } from './client';
 import { pool, withTransaction } from './db';
 import { ENDPOINT, dbl, str, upsertChunked } from './util';
+import { refreshRegionDaily } from './congestion';
 
 interface Sigungu { areaCd: string; signguCd: string; signguNm: string }
 const here = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +56,19 @@ async function main() {
     if (err instanceof DailyLimitError) console.warn(`[tats] ⛔ ${err.message}`);
     else { console.error('[tats] 실패:', (err as Error).message); process.exitCode = 1; }
   } finally {
+    // 원본을 채웠으면 집계도 함께 갱신한다 — 추천은 tats_cnctr 를 직접 읽지 않고 이 집계만
+    //  읽는다. 여기서 부르지 않으면 원본만 늘고 집계는 멈춰, 미래 날짜의 혼잡도가 통째로
+    //  사라진다(congestion.ts 주석 참고). 부분 수집·일일한도 종료에도 돌린다 —
+    //  받은 만큼이라도 반영하는 편이 낫다.
+    //  ⚠️ 집계 실패가 수집 결과를 덮지 않게 한다. 수집은 이미 끝났고 성공/실패는 위에서 정했다.
+    try {
+      const agg = await refreshRegionDaily();
+      console.log(agg.skipped
+        ? '[tats] 집계 생략 — tats_cnctr 가 비어 있다'
+        : `[tats] 혼잡도 집계 ${agg.rows}행 · ${agg.from} ~ ${agg.to}`);
+    } catch (err) {
+      console.warn('[tats] ⚠ 혼잡도 집계 실패:', (err as Error).message);
+    }
     await pool.end();
   }
 }

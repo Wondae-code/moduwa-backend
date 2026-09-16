@@ -21,17 +21,18 @@ create table if not exists tats_region_daily (
   primary key (regn_cd, base_ymd)
 );
 
--- ⚠️ **소스가 비어 있으면 손대지 않는다.** prod 에는 tats_cnctr 가 (테이블은 있고) 비어 있어서,
---    무조건 delete + insert 로 짜면 push-data.sh 로 실어 보낸 집계가 다음 migrate 때 지워진다.
---    018(related_places)이 정확히 그 구조라 같은 위험이 있다 — 아래 별도 가드 참고.
-do $$
-begin
-  if exists (select 1 from tats_cnctr limit 1) then
-    delete from tats_region_daily;
-    insert into tats_region_daily (regn_cd, base_ymd, rate)
-    select left(signgu_cd, 2), base_ymd, avg(cnctr_rate)::numeric(6,2)
-      from tats_cnctr
-     where signgu_cd is not null and base_ymd is not null
-     group by 1, 2;
-  end if;
-end $$;
+-- ── 집계는 여기 있지 않다 (2026-09-16 이동)
+--
+--  예전에는 이 파일 안에서 delete + insert 로 집계했다. 그런데 **마이그레이션은 파일 해시가
+--  바뀔 때만 다시 돈다** — 사실상 한 번 돌고 끝이다. ingest:tats 가 매일 원본을 늘려도 집계는
+--  처음 값에 멈춰 있었고, 실제로 원본이 20261015 까지 있는데 집계는 20260913 에서 멈춰
+--  **사용자가 고르는 미래 날짜의 혼잡도가 전부 null** 이 되어 있었다(추천이 통째로 빗나갔다).
+--
+--  그래서 집계를 src/congestion.ts 로 옮기고 **원본을 채우는 ingest-tats 가 끝에 부른다.**
+--  원본과 집계가 같은 명령에서 함께 움직이면 다시 어긋날 자리가 없다.
+--  수동 실행: `npm run aggregate:congestion`
+--
+--  ⚠️ 이 파일이 행을 지우지 않게 된 것이 그 자체로 안전 장치이기도 하다. 전에는
+--     tats_cnctr 가 채워진 DB 에서 migrate 를 돌리면 집계를 지우고 다시 넣었는데,
+--     prod 에 원본이 부분만 들어간 상태로 그게 돌면 push-data.sh 로 실어 보낸
+--     온전한 집계가 부분 데이터로 덮인다. 이제 migrate 는 표만 만든다.

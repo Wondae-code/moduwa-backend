@@ -444,7 +444,16 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
           if (slot === 'spot') s += c.hub_bonus;
           // 혼잡일 보정 — 유명한 곳일수록 크게 깎는다(hub_rank 가 있는 24% 에만 적용된다).
           //  avoidCrowds 를 고르면 같은 방향으로 더 세게 민다(값은 설정에서 온다).
-          if (c.hub_rank != null) {
+          //
+          //  ⚠️ **rate 가 null 이면 아무것도 더하지 않는다.** 예전에는 busy 하나로만 갈라서
+          //     `busy ? 감점 : 보너스` 였는데, rate 가 null 일 때도 busy 가 false 라
+          //     **"한산일 보너스" 분기를 탔다.** 데이터 없음과 한산함은 다른 것이다.
+          //     2026-09-16 실측: 집계가 20260913 에서 멈춰 사용자가 고르는 미래 날짜는 전부
+          //     rate=null 이었고, 그래서 유명한 곳 2,444곳이 무조건 +10 을 받았다.
+          //     「덜 붐볐으면 좋겠어요」를 고르면 +22 로 **더 크게** 올라갔다 — 고른 것과
+          //     정반대 방향이다. 예측 범위 밖의 날짜(한 달 뒤 여행)는 집계를 매일 갱신해도
+          //     계속 null 이므로, 이 분기는 집계 문제와 별개로 필요하다.
+          if (c.hub_rank != null && rate != null) {
             s += busy
               ? -(avoid ? (w.get('congestion.avoid_busy_penalty') ?? 35) : (w.get('congestion.busy_penalty') ?? 15))
               : (avoid ? (w.get('congestion.avoid_quiet_bonus') ?? 22) : (w.get('congestion.quiet_bonus') ?? 10));
