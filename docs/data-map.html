@@ -354,7 +354,7 @@
           <span class="col-chip">content_id</span><span class="col-chip">service</span>
           <span class="col-chip">title</span><span class="col-chip">mapx/y</span>
           <span class="col-chip">content_type_id</span><span class="col-chip">ldong_regn_cd</span>
-          <span class="col-chip">ldong_signgu_cd</span><span class="col-chip">area_code</span>
+          <span class="col-chip">ldong_signgu_cd</span>
         </div>
         <div class="kv">
           <div><span class="k">고유키</span><span class="v">natural_key = service:content_id</span></div>
@@ -709,8 +709,8 @@ group by 1,2,3;</pre>
       </div>
       <div class="caveat">
         <span class="mark">③</span>
-        <div><h4>kor_poi의 지역코드는 두 체계가 섞여 있습니다</h4>
-        <p><code>area_code</code>/<code>sigungu_code</code>는 TourAPI 자체의 구(舊) 코드(약 51%만 채워짐)이고, <code>ldong_regn_cd</code>+<code>ldong_signgu_cd</code>가 실제 법정동 코드(거의 100%)입니다. 지역 조인엔 반드시 후자를 쓰고, 조합식(위 ②번 쿼리)을 적용하세요.</p></div>
+        <div><h4>kor_poi의 지역코드는 법정동 한 체계입니다</h4>
+        <p><code>ldong_regn_cd</code>(시·도 2자리)+<code>ldong_signgu_cd</code>(시·군·구 3자리)가 지역코드이고 거의 100% 채워져 있습니다. 지역 조인엔 이 둘을 쓰고, 조합식(위 ②번 쿼리)을 적용하세요. 예전에 함께 저장하던 TourAPI 구(舊) 코드 <code>area_code</code>/<code>sigungu_code</code>는 절반 이상 비어 있고 읽는 곳이 없어 2026-09-19에 걷어냈습니다(원값은 <code>raw</code>에 남아 있습니다).</p></div>
       </div>
       <div class="caveat">
         <span class="mark">④</span>
