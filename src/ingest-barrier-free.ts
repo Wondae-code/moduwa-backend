@@ -47,11 +47,11 @@ async function main() {
   const res = await query(`
     insert into barrier_free (
       contentid, title, contenttypeid, addr1, addr2, mapx, mapy, firstimage, firstimage2,
-      area_code, sigungu_code, ldong_regn_cd, ldong_signgu_cd,
+      area_code, ldong_regn_cd, ldong_signgu_cd,
       lcls_systm1, lcls_systm2, lcls_systm3, ${attrCols}, has_image, has_access, ${accessCols})
     select
       p.content_id, p.title, p.content_type_id, p.addr1, p.addr2, p.mapx, p.mapy, p.firstimage, p.firstimage2,
-      p.area_code, p.sigungu_code, p.ldong_regn_cd, p.ldong_signgu_cd,
+      p.area_code, p.ldong_regn_cd, p.ldong_signgu_cd,
       p.lcls_systm1, p.lcls_systm2, p.lcls_systm3, ${attrSel},
       (p.firstimage is not null and p.firstimage <> ''),
       (${hasAccessExpr}),
@@ -62,7 +62,7 @@ async function main() {
       title = excluded.title, contenttypeid = excluded.contenttypeid,
       addr1 = excluded.addr1, addr2 = excluded.addr2, mapx = excluded.mapx, mapy = excluded.mapy,
       firstimage = excluded.firstimage, firstimage2 = excluded.firstimage2,
-      area_code = excluded.area_code, sigungu_code = excluded.sigungu_code,
+      area_code = excluded.area_code,
       ldong_regn_cd = excluded.ldong_regn_cd, ldong_signgu_cd = excluded.ldong_signgu_cd,
       lcls_systm1 = excluded.lcls_systm1, lcls_systm2 = excluded.lcls_systm2,
       lcls_systm3 = excluded.lcls_systm3,

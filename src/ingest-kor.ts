@@ -7,7 +7,7 @@ import { ENDPOINT, dbl, str, upsertChunked } from './util';
 
 const COLUMNS = [
   'service', 'content_id', 'content_type_id', 'title', 'addr1', 'addr2', 'zipcode',
-  'area_code', 'sigungu_code', 'ldong_regn_cd', 'ldong_signgu_cd',
+  'area_code', 'ldong_regn_cd', 'ldong_signgu_cd',
   'cat1', 'cat2', 'cat3', 'lcls_systm1', 'lcls_systm2', 'lcls_systm3',
   'mapx', 'mapy', 'mlevel', 'tel', 'firstimage', 'firstimage2',
   'created_time', 'modified_time', 'raw', 'natural_key',
@@ -17,7 +17,7 @@ function toRow(service: string, it: ApiItem): unknown[] {
   return [
     service, str(it['contentid']), str(it['contenttypeid']), str(it['title']),
     str(it['addr1']), str(it['addr2']), str(it['zipcode']),
-    str(it['areacode']), str(it['sigungucode']), str(it['lDongRegnCd']), str(it['lDongSignguCd']),
+    str(it['areacode']), str(it['lDongRegnCd']), str(it['lDongSignguCd']),
     str(it['cat1']), str(it['cat2']), str(it['cat3']),
     str(it['lclsSystm1']), str(it['lclsSystm2']), str(it['lclsSystm3']),
     dbl(it['mapx']), dbl(it['mapy']), str(it['mlevel']), str(it['tel']),
