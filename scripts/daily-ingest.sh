@@ -39,6 +39,16 @@ LOG="$PROJECT/logs/daily-ingest-$(date +%Y%m%d).log"
     npm run "$cmd" || echo "[wrap] $cmd 실패 — 계속 진행"
   done
 
+  # 4-2) 혼잡도 집계 — ingest:tats 가 finally 에서 부르지만, **여기서 한 번 더 돌린다.**
+  #      2026-09-19 실측: data.go.kr 지연으로 ingest:tats 가 78분 걸리다 exit 0 으로 조용히
+  #      끝났는데(✅ 완료 없음), finally 의 집계도 안 돌았다 — await 없이 부른 main() 에서
+  #      이벤트 루프가 비면 Node 는 0 으로 빠져나가고 finally 는 실행되지 않는다. 그러면 원본은
+  #      늘었는데 집계는 전날 값으로 push 되어, 09-16 에 고친 그 병이 다른 문으로 돌아온다.
+  #      집계는 0.4초짜리 group by 하나라 두 번 도는 비용이 없고, 원본이 비어 있으면 스스로
+  #      건너뛴다(congestion.ts 가드). 수집이 전부 실패해도 어제 원본으로 집계는 맞는다.
+  echo "──── npm run aggregate:congestion ($(date '+%H:%M:%S')) ────"
+  npm run aggregate:congestion || echo "[wrap] 혼잡도 집계 실패 — 전날 집계로 push 된다"
+
   # 5) 관리형 DB 동기화 — API용 슬림 테이블만 push (무거운 원본은 로컬에만 유지).
   #    .env 에 MANAGED_DATABASE_URL 이 설정돼 있으면 실행. 없으면 조용히 건너뜀.
   MANAGED_URL="$(grep -E '^MANAGED_DATABASE_URL=' "$PROJECT/.env" 2>/dev/null | cut -d= -f2-)"
