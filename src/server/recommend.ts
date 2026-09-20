@@ -19,6 +19,7 @@
 //  · 노키즈존·노펫존 제외 — 공식 데이터가 없다. v1 은 양성 신호를 위로 올리는 것으로 갈음한다.
 //    "가면 입장을 거절당하는" 경우는 이 방식으로 막지 못한다 — 의식적으로 미룬 것이다.
 import { query } from '../db';
+import { toHttps } from './image-url';
 
 // ── 동반자 유형. 명세 2-2 의 태그 소스이자 가중치 분기다.
 export type PartyKind = 'kids' | 'pet' | 'elderly' | 'couple' | 'friends' | 'solo';
@@ -378,7 +379,15 @@ export type RecommendDay = {
 export type RecommendResult = {
   region: string;
   days: RecommendDay[];
-  stay: { contentID: string; name: string; imageURL: string | null } | null;
+  /**
+   * 숙소. **items 와 같은 좌표 필드를 싣는다** — 없으면 지도에 숙소만 핀이 빠진다(앱팀 보고).
+   *  같은 응답 안에서 어떤 장소는 좌표가 있고 어떤 장소는 없으면, 받는 쪽은 그게 규칙인지
+   *  누락인지 알 수 없다. 장소를 내보내는 자리는 모양을 맞춘다.
+   */
+  stay: {
+    contentID: string; name: string; imageURL: string | null;
+    latitude: number | null; longitude: number | null;
+  } | null;
   notes: RecommendNote[];
 };
 
@@ -562,7 +571,10 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
         hasAccessInfo: pick.c.has_access_info,
         slot, contentID: pick.c.contentid, name: pick.c.title,
         categoryLabel: pick.c.is_cafe ? '카페' : (TYPE_LABEL[pick.c.contenttypeid] ?? '기타'),
-        imageURL: pick.c.firstimage,
+        // ⚠️ **http 인 채로 내보내면 iOS ATS 가 막아 사진만 조용히 안 뜬다.** 수집 원본의
+        //    44%(숙소는 652곳 중 256곳)가 http 다. app.ts 의 다른 엔드포인트는 전부 이걸
+        //    거치는데 이 파일만 빠져 있었다(2026-09-21).
+        imageURL: toHttps(pick.c.firstimage),
         latitude: pick.c.mapy, longitude: pick.c.mapx,
       });
     }
@@ -574,7 +586,12 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
   return {
     region: region.label,
     days,
-    stay: stay ? { contentID: stay.contentid, name: stay.title, imageURL: stay.firstimage } : null,
+    stay: stay
+      ? {
+          contentID: stay.contentid, name: stay.title, imageURL: toHttps(stay.firstimage),
+          latitude: stay.mapy, longitude: stay.mapx,
+        }
+      : null,
     notes,
   };
 }
