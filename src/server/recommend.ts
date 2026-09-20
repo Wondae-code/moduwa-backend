@@ -83,6 +83,9 @@ const BUDGET_FALLBACK: Record<string, string[]> = {
 let weightCache: { at: number; map: Map<string, number> } | null = null;
 const WEIGHT_TTL_MS = 60_000;
 
+/** 앱 plans.party.mobilities 가 쓰는 값. 여기 없는 값은 무시한다. */
+const MOBILITIES = new Set(['car', 'walking', 'wheelchair']);
+
 /** 검색(app.ts /v1/search)도 이 캐시를 함께 쓴다 — search.* 키. */
 export async function weights(): Promise<Map<string, number>> {
   if (weightCache && Date.now() - weightCache.at < WEIGHT_TTL_MS) return weightCache.map;
@@ -110,6 +113,17 @@ export type RecommendInput = {
    * 사용자가 명시적으로 고르면 더 강하게 반영한다.
    */
   avoidCrowds?: boolean;
+  /**
+   * 이동 수단. 앱 1/6 의 답이고, **앱이 plans.party.mobilities 에 저장하는 이름·값 그대로**다
+   * (car · walking · wheelchair, 복수 선택). 새 어휘를 만들지 않는다 — 같은 것을 두 이름으로
+   * 부르면 한쪽을 고칠 때 다른 쪽이 조용히 어긋난다(이 세션에서 축 이름으로 겪었다).
+   *
+   *  ⚠️ **자차가 섞여 있으면 거리는 자차 기준이다.** 휠체어를 쓰지만 차로 이동하는 사람에게
+   *     동선을 좁히면 갈 수 있는 곳을 빼앗는다. 반대로 접근성은 wheelchair 가 하나라도 있으면
+   *     적용한다 — 차로 가도 도착해서는 휠체어로 다닌다.
+   *  모르는 값은 무시한다(400 이 아니다). 빈 배열·미전송은 지금 동작 그대로다.
+   */
+  mobilities?: string[];
 };
 
 export type RecommendNote =
@@ -128,6 +142,10 @@ type Candidate = {
   access_infant: boolean; access_wheelchair: boolean; access_elderly: boolean; has_image: boolean;
   lcls_systm3: string | null;
   is_pet_ok: boolean; is_cafe: boolean; kakao_cat: string | null; norm_name: string;
+  /** 휠체어 축 12개 속성 중 몇 개가 채워져 있나(0~10 실측). 이동수단 wheelchair 에만 쓴다. */
+  wheelchair_fit: number;
+  /** 대중교통 안내가 있는가. 이동수단 walking(뚜벅이)에만 쓴다. */
+  has_transit: boolean;
   /**
    * 무장애 조사를 받은 곳인가. false 면 접근성을 **모르는** 것이지 나쁘다는 뜻이 아니다.
    * 식사·카페 슬롯에만 false 가 섞인다(아래 collectCandidates 주석).
@@ -187,6 +205,14 @@ async function collectCandidates(
     select b.contentid, b.title, b.contenttypeid, b.addr1, b.firstimage,
            b.mapx, b.mapy, b.hub_rank, b.tats_nm,
            b.access_infant, b.access_wheelchair, b.access_elderly, b.has_image, b.lcls_systm3,
+           -- 휠체어 축 충실도. access_wheelchair 는 89% 가 true 라 가려내지 못하는데(실측),
+           --  속성 개수는 0~10 으로 갈려 실제 신호가 된다. ACCESS_GROUP_SCORES 와 같은 12개다.
+           ((b.parking is not null)::int + (b.route is not null)::int + (b.publictransport is not null)::int
+            + (b.ticketoffice is not null)::int + (b.promotion is not null)::int + (b.wheelchair is not null)::int
+            + (b.exit is not null)::int + (b.elevator is not null)::int + (b.restroom is not null)::int
+            + (b.auditorium is not null)::int + (b.room is not null)::int
+            + (b.handicapetc is not null)::int) as wheelchair_fit,
+           (b.publictransport is not null and b.publictransport <> '') as has_transit,
            exists (select 1 from pet_tour_poi p where p.contentid = b.contentid) as is_pet_ok,
            -- 카페 슬롯은 카카오 분류(CE7)로 고른다. 관광공사 유형에는 '카페' 가 없어서
            --  음식(39)에서 아무거나 고르면 순두부집이 카페 자리에 들어간다(실제로 그랬다).
@@ -232,6 +258,8 @@ async function collectCandidates(
            p.mapx, p.mapy, null::integer as hub_rank, null::text as tats_nm,
            false as access_infant, false as access_wheelchair, false as access_elderly,
            true as has_image, null::text as lcls_systm3,
+           -- 조사를 안 받은 곳이라 둘 다 모른다. 중립값이다 — 모르는 것에 벌점을 주지 않는다.
+           0 as wheelchair_fit, false as has_transit,
            false as is_pet_ok,
            exists (select 1 from kakao_place k
                     where k.content_id = p.content_id and k.matched
@@ -359,6 +387,18 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
   if (!region) return null;
 
   const w = await weights();
+
+  /**
+   * 이동 수단 해석. 모르는 값은 조용히 무시한다 — 앱이 서버보다 먼저 항목을 늘릴 수 있고,
+   * 그때 400 을 주면 추천 화면 전체가 빈다(access 필터·visitor 태그와 같은 규칙).
+   */
+  const modes = new Set((input.mobilities ?? []).filter((m) => MOBILITIES.has(m)));
+  const byCar = modes.has('car');
+  const onFoot = (modes.has('walking') || modes.has('wheelchair')) && !byCar;
+  const needsWheelchair = modes.has('wheelchair');
+  // 자차가 섞여 있으면 거리는 자차 기준이다(위 mobilities 주석).
+  const distMult = onFoot ? (w.get('mobility.foot_distance_mult') ?? 4) : (w.get('mobility.distance_mult') ?? 1.5);
+  const distCap = onFoot ? (w.get('mobility.foot_distance_cap') ?? 80) : (w.get('mobility.distance_cap') ?? 30);
   const party = (input.party ?? []).filter((p): p is PartyKind => PARTY_KINDS.has(p));
   const avoid = input.avoidCrowds === true;
   const notes: RecommendNote[] = [];
@@ -470,11 +510,25 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
               : (avoid ? (w.get('congestion.avoid_quiet_bonus') ?? 22) : (w.get('congestion.quiet_bonus') ?? 10));
           }
           // 이동 거리 — 직전 장소에서 멀수록 감점. Directions 없이 하루 동선을 뭉치는 장치다.
-          if (prev) s -= Math.min(30, distKm(prev, c) * 1.5);
+          //
+          //  ⚠️ **배수가 핵심이고 상한이 아니다.** 상한만 30→100 으로 올려 봤을 때는 가평
+          //     동선이 39→36km 로 거의 그대로였는데(2026-09-20 실측), 배수를 1.5→4 로 올리니
+          //     39→14km 로 잡혔다. 상한은 배수가 만든 값을 자르는 뚜껑일 뿐이다.
+          //  뚜벅이·휠체어에게 40km 는 40분이 아니라 못 가는 거리다. 자차면 지금 그대로 둔다 —
+          //  좁히면 갈 수 있는 곳을 빼앗는 것이 된다.
+          if (prev) s -= Math.min(distCap, distKm(prev, c) * distMult);
           // 무장애 조사를 받은 곳을 먼저 쓴다. 막지 않고 뒤로 미는 것이다 —
           //  가평처럼 조사된 식당이 1곳뿐인 지역에서 그 한 곳이 첫 끼에 쓰이고,
           //  나머지 여덟 끼를 조사되지 않은 곳이 채운다. 우선순위가 뒤바뀌지 않게 한다.
-          if (!c.has_access_info) s += w.get('access.unsurveyed') ?? -18;
+          //  ⚠️ 휠체어 이용자에게는 **모른다는 것 자체가 더 큰 문제**다. 동선을 좁히면 닿는
+          //     범위에 조사된 식당이 줄어 미조사가 그 자리를 메운다(가평 실측: 4/24 → 10/24).
+          //     그래서 더 세게 민다. 다만 **막지는 않는다** — 가평은 조사된 식당이 1곳뿐이라
+          //     (039 주석) 걸러 내면 아홉 끼가 통째로 빈다. 빈 코스가 더 나쁘다.
+          if (!c.has_access_info) {
+            s += needsWheelchair
+              ? (w.get('mobility.wheelchair_unsurveyed') ?? -40)
+              : (w.get('access.unsurveyed') ?? -18);
+          }
           // 식사 자리의 쇼핑 — 서울처럼 백화점이 인기순위 상위에 몰린 지역에서는
           //  그대로 두면 세 끼가 전부 백화점이 된다(실제로 그랬다). 시장은 예외로 둔다.
           if (slot !== 'cafe' && c.contenttypeid === '38' && !isMarket(c.title)) {
@@ -487,6 +541,11 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
             if (got === want) s += w.get('meal.time_match') ?? 20;
             else if (got !== 'any') s += w.get('meal.time_mismatch') ?? -25;
           }
+          // 이동 수단 — 휠체어는 축 충실도로, 뚜벅이는 대중교통 안내로 민다.
+          //  둘 다 **거르지 않고 점수만** 민다. 거르면 가평처럼 후보가 얇은 지역에서
+          //  코스가 통째로 비고, 그건 "갈 데가 없다" 가 아니라 "우리가 모른다" 일 뿐이다.
+          if (needsWheelchair) s += c.wheelchair_fit * (w.get('mobility.wheelchair_fit') ?? 4);
+          if (onFoot && c.has_transit) s += w.get('mobility.transit_bonus') ?? 12;
           // 다양성 — 그날 같은 유형이 나올 때마다 누적 감점.
           const seen = typesToday.get(c.contenttypeid) ?? 0;
           if (seen > 0) s += seen * (w.get('diversity.same_type') ?? -10);

@@ -977,6 +977,7 @@ curl -X POST "$BASE/v1/reviews/images" \
 |---|---|---|
 | `region` 또는 `regionCode` | ✅ | 슬러그(`gangneung`) 또는 `ldong_regn_cd`(`51`). 슬러그 목록은 `region_slugs` |
 | `sigunguCode` | | `regionCode`와 함께 쓸 때 시군구까지 좁힘 |
+| `mobilities` | `["walking"]` | 이동 수단 — `car` · `walking` · `wheelchair` (복수). 앱이 `plans.party.mobilities`에 저장하는 이름·값 그대로 |
 | `startDate`/`endDate` | ✅ | `YYYY-MM-DD`, **최대 14일** |
 | `party` | | `kids`·`pet`·`elderly`·`couple`·`friends`·`solo` |
 | `themes` | | `GET /v1/plan-options`의 테마 코드. 목록 밖은 **400** |

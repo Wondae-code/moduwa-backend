@@ -87,7 +87,7 @@ export function buildApp(): Hono<AppEnv> {
       '🔒 DELETE /v1/reviews/:reviewId  (본인 것만)',
       '🔒 POST /v1/reviews/:reviewId/comments  {body, authorNm?}',
       '🔒 PATCH · DELETE /v1/reviews/:reviewId/comments/:commentId  (본인 것만)',
-      '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?, avoidCrowds?}',
+      '🔒 POST /v1/plans/recommend  {region|regionCode, startDate, endDate, party?, themes?, budget?, dayTripOnly?, avoidCrowds?, mobilities?}',
       '🔒 GET /v1/plans',
       '🔒 GET /v1/plans/:planId',
       '🔒 PUT /v1/plans/:planId  {authorNm?, title, startDate, endDate, region?, party?, themes?, budget?, dayTripOnly?, coverImageURL?, days[]}',
@@ -1976,6 +1976,10 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
       region: str(p.region) || undefined,
       regionCode: str(p.regionCode) || undefined,
       sigunguCode: str(p.sigunguCode) || undefined,
+      // 이동 수단 — 앱이 plans.party.mobilities 에 저장하는 이름·값 그대로 받는다(057).
+      mobilities: Array.isArray(p.mobilities)
+        ? p.mobilities.filter((v): v is string => typeof v === 'string').slice(0, 3)
+        : undefined,
       startDate, endDate,
       party: arr(p.party) as PartyKind[],
       themes,
