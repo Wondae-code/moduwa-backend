@@ -559,13 +559,13 @@ export async function imageSources(): Promise<ImageSourceOption[]> {
  * 지역 필터용 시·도 목록.
  *
  *  region_slugs 는 시·군·구까지 있지만 38행뿐이라 시·군 단위로는 대부분이 안 걸린다
- *  (barrier_free 10,274 행 중 2,623 행만 매칭). 시·도 단위(signgu_cd is null)로는 10,271 행이
+ *  (barrier_free 10,274 행 중 2,623 행만 매칭). 시·도 단위(signgu_cds is null)로는 10,271 행이
  *  걸리므로 이 화면은 시·도만 쓴다. regn_cd 가 겹치는 행이 있어 distinct 로 접는다.
  */
 export async function imageRegions(): Promise<ImageRegion[]> {
   const res = await readOnlyQuery<ImageRegion>(
     `select distinct regn_cd as code, label from region_slugs
-      where signgu_cd is null order by code`,
+      where signgu_cds is null order by code`,
   );
   return res.rows;
 }

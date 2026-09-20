@@ -139,18 +139,29 @@ type Candidate = {
   score: number;
 };
 
-/** 지역 슬러그·코드를 (regn, signgu) 로 푼다. 알 수 없으면 null — 조용히 전국을 뒤지지 않는다. */
+/**
+ * 지역 슬러그·코드를 (regn, signgu) 로 푼다. 알 수 없으면 null — 조용히 전국을 뒤지지 않는다.
+ *
+ *  ⚠️ **signgu 는 목록이다.** 일반구를 둔 시는 법정동 코드가 여러 개라(포항 111·113,
+ *     전주 111·113, 창원 5개 …) 하나만 들면 그 도시가 반쪽만 추천된다 — 055 참고.
+ *     null 은 "그 시·도 전체" 라는 뜻으로 그대로다.
+ */
 export async function resolveRegion(
   input: RecommendInput,
-): Promise<{ regn: string; signgu: string | null; label: string } | null> {
+): Promise<{ regn: string; signgu: string[] | null; label: string } | null> {
   if (input.regionCode) {
-    return { regn: input.regionCode, signgu: input.sigunguCode ?? null, label: input.regionCode };
+    // 코드를 직접 준 호출자는 시군구도 하나만 준다 — 배열로 감싸 아래와 같은 모양으로 맞춘다.
+    return {
+      regn: input.regionCode,
+      signgu: input.sigunguCode ? [input.sigunguCode] : null,
+      label: input.regionCode,
+    };
   }
   if (!input.region) return null;
-  const row = (await query<{ regn_cd: string; signgu_cd: string | null; label: string }>(
-    'select regn_cd, signgu_cd, label from region_slugs where slug = $1', [input.region.trim()],
+  const row = (await query<{ regn_cd: string; signgu_cds: string[] | null; label: string }>(
+    'select regn_cd, signgu_cds, label from region_slugs where slug = $1', [input.region.trim()],
   )).rows[0];
-  return row ? { regn: row.regn_cd, signgu: row.signgu_cd, label: row.label } : null;
+  return row ? { regn: row.regn_cd, signgu: row.signgu_cds, label: row.label } : null;
 }
 
 /**
@@ -161,7 +172,7 @@ export async function resolveRegion(
  * 후기는 실제로 다녀와야 쓸 수 있으므로 그 자체가 행동 증거다.
  */
 async function collectCandidates(
-  region: { regn: string; signgu: string | null },
+  region: { regn: string; signgu: string[] | null },
   party: PartyKind[],
   themes: string[],
   w: Map<string, number>,
@@ -197,7 +208,7 @@ async function collectCandidates(
            0::numeric as score, 0::numeric as hub_bonus
       from barrier_free b
      where b.ldong_regn_cd = $1
-       and ($2::text is null or b.ldong_signgu_cd = $2)
+       and ($2::text[] is null or b.ldong_signgu_cd = any($2))
        and b.contenttypeid = any($3)
        and b.has_image                       -- 카드에 쓸 사진이 없으면 추천 화면이 비어 보인다
 
@@ -236,7 +247,7 @@ async function collectCandidates(
            0::numeric as score, 0::numeric as hub_bonus
       from unsurveyed_dining p
      where p.ldong_regn_cd = $1
-       and ($2::text is null or p.ldong_signgu_cd = $2)
+       and ($2::text[] is null or p.ldong_signgu_cd = any($2))
   `, [region.regn, region.signgu, [...wantTypes], tagCodes.length ? tagCodes : ['__none__']])).rows;
 
   const neutral = w.get('base.neutral') ?? 50;
