@@ -2604,13 +2604,18 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   /**
    * 앱 미설치자에게 보여줄 스토어 버튼. User-Agent 로 플랫폼을 가른다.
    *
+   *  라벨은 **각 스토어의 공식 이름**을 쓴다 — 애플은 "App Store", 구글은 "Google Play" 다
+   *  (Play Store · 플레이스토어 같은 통칭을 쓰지 않는다).
+   *
+   * ⚠️ **그 플랫폼의 스토어가 없으면 버튼을 만들지 않는다.** 안드로이드 이용자에게 App Store
+   *    버튼을 주면 받을 수 없는 곳으로 보내는 것이다. 한때 "어디 있는지는 알려주자" 는 생각으로
+   *    라벨만 바꿔 보여 줬는데, 누르면 아무것도 못 하는 버튼은 정보가 아니라 헛걸음이다.
+   *    대신 한 줄로 상황을 적는다.
+   *
    * ⚠️ **판별에 실패하면 있는 것을 전부 보여준다.** UA 로 하나를 찍어 틀리면 받을 수 없는
    *    앱으로 보내게 되는데, 그건 누르는 사람 화면에도 우리 로그에도 아무 표시가 안 남는다.
-   *    데스크톱·인앱 브라우저·크롤러처럼 애매한 UA 가 실제로 많다 — 모를 때는 고르지 않는다.
-   *
-   * ⚠️ **그 플랫폼의 링크가 없으면 다른 스토어로 보내지 않는다.** 안드로이드 이용자에게
-   *    App Store 를 주면 받을 수 없는 곳으로 보내는 것이다. 대신 스토어 이름을 라벨에 적어
-   *    "이 앱은 저쪽에 있다" 가 보이게 한다 — 버튼이 아예 없는 것보다 알 수 있는 것이 많다.
+   *    데스크톱·크롤러처럼 애매한 UA 가 실제로 많고, 최근 아이패드는 스스로를 Macintosh 라
+   *    한다 — 그 경우도 여기로 떨어져 막다른 길이 되지 않는다.
    */
   const storeButtons = (c: Context): string => {
     const ua = c.req.header('user-agent') ?? '';
@@ -2618,13 +2623,15 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
     const play = config.web.playStoreUrl;
     const btn = (url: string, label: string) =>
       `<a class="btn2" href="${esc(url)}">${esc(label)}</a>`;
+    const note = (text: string) => `<p class="s">${esc(text)}</p>`;
 
-    // 아이패드는 최근 UA 에서 스스로를 Macintosh 라고 한다 — 그때는 아래 "모름" 으로 떨어져
-    //  둘 다 보이므로 막다른 길이 되지 않는다.
-    if (/iphone|ipad|ipod/i.test(ua) && apple) return btn(apple, '앱 받기');
-    if (/android/i.test(ua) && play) return btn(play, '앱 받기');
-
-    // 모르거나, 그 플랫폼 링크가 없을 때 — 가진 것을 스토어 이름과 함께 전부 보여준다.
+    if (/iphone|ipad|ipod/i.test(ua)) {
+      return apple ? btn(apple, 'App Store에서 받기') : note('iPhone 앱은 준비 중이에요.');
+    }
+    if (/android/i.test(ua)) {
+      return play ? btn(play, 'Google Play에서 받기') : note('Android 앱은 준비 중이에요.');
+    }
+    // 모름 — 가진 것을 전부 보여주고 고르게 한다.
     return [
       apple ? btn(apple, 'App Store에서 받기') : '',
       play ? btn(play, 'Google Play에서 받기') : '',
