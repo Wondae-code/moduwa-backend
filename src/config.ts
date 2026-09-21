@@ -127,8 +127,10 @@ export const config = {
     // Android App Links 용. 구글 로그인 때 쓴 서명 지문(SHA-256)과 패키지명.
     androidPackage: process.env.ANDROID_PACKAGE?.trim() ?? '',
     androidCertSha256: list('ANDROID_CERT_SHA256'),
-    // 앱 미설치자 대체 페이지의 스토어 버튼. 출시 전에는 비워 두면 버튼이 숨는다.
+    // 앱 미설치자 대체 페이지의 스토어 버튼. 출시 전에는 비워 두면 그 스토어만 숨는다.
+    //  둘 다 비면 버튼이 아예 안 나온다.
     appStoreUrl: process.env.APP_STORE_URL?.trim() ?? '',
+    playStoreUrl: process.env.PLAY_STORE_URL?.trim() ?? '',
   },
 
   // ── 푸시 알림(APNs) ──

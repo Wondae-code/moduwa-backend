@@ -206,13 +206,13 @@ export function buildApp(): Hono<AppEnv> {
       state = row ? (row.expired ? 'expired' : 'ok') : 'invalid';
     }
 
-    const store = config.web.appStoreUrl;
+    const store = storeButtons(c);
     const body = state === 'ok'
       ? `<p class="m">여행 플랜에 초대받으셨어요.</p>
          <a class="btn" href="moduwa://i/${raw}">앱에서 열기</a>
          <p class="s">버튼이 동작하지 않으면 모두와 앱의<br><b>플랜 → 초대 코드 입력</b>에 아래 코드를 넣어주세요.</p>
          <div class="code">${raw.slice(0, 4)}-${raw.slice(4)}</div>
-         ${store ? `<a class="btn2" href="${esc(store)}">앱 받기</a>` : ''}`
+         ${store}`
       : state === 'expired'
         ? `<p class="m">초대가 만료되었어요.</p>
            <p class="s">초대 코드는 30분 동안만 유효해요.<br>초대한 분에게 새 코드를 요청해주세요.</p>`
@@ -264,7 +264,7 @@ export function buildApp(): Hono<AppEnv> {
          from barrier_free where contentid = $1`, [id],
     )).rows[0];
 
-    const store = config.web.appStoreUrl;
+    const store = storeButtons(c);
     const origin = config.web.origin;
     const url = `${origin}/p/${id}`;
 
@@ -294,11 +294,11 @@ export function buildApp(): Hono<AppEnv> {
             ? `<div class="tags">${features.map((f) => `<span class="tag">${esc(f)}</span>`).join('')}</div>`
             : '<p class="s">등록된 무장애 정보가 없어요.</p>'}
          <a class="btn" href="moduwa://p/${id}">앱에서 열기</a>
-         ${store ? `<a class="btn2" href="${esc(store)}">앱 받기</a>` : ''}
+         ${store}
          <p class="src">무장애 정보 출처: 한국관광공사 TourAPI</p>`
       : `<p class="m">찾을 수 없는 장소예요.</p>
          <p class="s">링크가 잘못 전달됐거나 정보가 내려갔을 수 있어요.</p>
-         ${store ? `<a class="btn2" href="${esc(store)}">앱 받기</a>` : ''}`;
+         ${store}`;
 
     return c.html(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2601,6 +2601,36 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
    *    바꾸다 실패하기 때문이다. 형식이 틀린 id 는 "없는 글" 이고, 없는 글은 404 다.
    *    앱이 "404 하나로 분기" 할 수 있어야 한다(앱 팀 요청).
    */
+  /**
+   * 앱 미설치자에게 보여줄 스토어 버튼. User-Agent 로 플랫폼을 가른다.
+   *
+   * ⚠️ **판별에 실패하면 있는 것을 전부 보여준다.** UA 로 하나를 찍어 틀리면 받을 수 없는
+   *    앱으로 보내게 되는데, 그건 누르는 사람 화면에도 우리 로그에도 아무 표시가 안 남는다.
+   *    데스크톱·인앱 브라우저·크롤러처럼 애매한 UA 가 실제로 많다 — 모를 때는 고르지 않는다.
+   *
+   * ⚠️ **그 플랫폼의 링크가 없으면 다른 스토어로 보내지 않는다.** 안드로이드 이용자에게
+   *    App Store 를 주면 받을 수 없는 곳으로 보내는 것이다. 대신 스토어 이름을 라벨에 적어
+   *    "이 앱은 저쪽에 있다" 가 보이게 한다 — 버튼이 아예 없는 것보다 알 수 있는 것이 많다.
+   */
+  const storeButtons = (c: Context): string => {
+    const ua = c.req.header('user-agent') ?? '';
+    const apple = config.web.appStoreUrl;
+    const play = config.web.playStoreUrl;
+    const btn = (url: string, label: string) =>
+      `<a class="btn2" href="${esc(url)}">${esc(label)}</a>`;
+
+    // 아이패드는 최근 UA 에서 스스로를 Macintosh 라고 한다 — 그때는 아래 "모름" 으로 떨어져
+    //  둘 다 보이므로 막다른 길이 되지 않는다.
+    if (/iphone|ipad|ipod/i.test(ua) && apple) return btn(apple, '앱 받기');
+    if (/android/i.test(ua) && play) return btn(play, '앱 받기');
+
+    // 모르거나, 그 플랫폼 링크가 없을 때 — 가진 것을 스토어 이름과 함께 전부 보여준다.
+    return [
+      apple ? btn(apple, 'App Store에서 받기') : '',
+      play ? btn(play, 'Google Play에서 받기') : '',
+    ].join('');
+  };
+
   const parsePostId = (raw: string | undefined): string | null =>
     raw && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(raw)
       ? raw : null
