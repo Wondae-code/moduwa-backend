@@ -212,7 +212,7 @@ export function buildApp(): Hono<AppEnv> {
          <a class="btn" href="moduwa://i/${raw}">앱에서 열기</a>
          <p class="s">버튼이 동작하지 않으면 모두와 앱의<br><b>플랜 → 초대 코드 입력</b>에 아래 코드를 넣어주세요.</p>
          <div class="code">${raw.slice(0, 4)}-${raw.slice(4)}</div>
-         ${store ? `<a class="btn2" href="${store}">앱 받기</a>` : ''}`
+         ${store ? `<a class="btn2" href="${esc(store)}">앱 받기</a>` : ''}`
       : state === 'expired'
         ? `<p class="m">초대가 만료되었어요.</p>
            <p class="s">초대 코드는 30분 동안만 유효해요.<br>초대한 분에게 새 코드를 요청해주세요.</p>`
