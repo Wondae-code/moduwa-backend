@@ -109,6 +109,19 @@ TARGET_DATABASE_URL="<관리형 공개 URL>" bash scripts/push-data.sh
 
 배포 URL: `https://moduwa-backend-production.up.railway.app`
 
+## 웹 페이지 (moduwa.app)
+`moduwa.app` 루트가 이 서버를 가리키므로 웹 페이지도 서버가 직접 서빙한다(별도 웹서버 없음).
+
+| 경로 | 내용 |
+|---|---|
+| `/` | **브라우저로 열면 랜딩 페이지**(`src/server/landing-page.ts`), 그 밖의 요청은 기존 API 안내 JSON. `Accept: text/html` 로 가른다 |
+| `/assets/landing/*` | 랜딩의 표지 사진(`src/server/assets/landing/`). URL 에 내용 해시가 붙어 영구 캐시 |
+| `/privacy` · `/terms` · `/support` · `/delete-account` | 처리방침 · 약관 · 고객 지원 · 계정 삭제 안내(`legal-pages.ts`) |
+| `/i/:code` · `/p/:contentId` | 초대 · 장소 공유 링크의 앱 미설치 대체 페이지 |
+
+랜딩의 색·글꼴은 디자인 시스템(Moduwa Green)의 CSS 변수를 그대로 쓰고, 글꼴은 Pretendard(jsDelivr)다.
+스토어 버튼은 `APP_STORE_URL` · `PLAY_STORE_URL` 을 읽는다 — 비어 있는 스토어는 "준비 중"으로 보인다.
+
 ## 수집 현황 대시보드 (`/dashboard`)
 데이터가 실제로 어떻게 쌓이는지 보고, 임의 조회까지 할 수 있는 운영 화면. **비밀번호 로그인**(폼 + HMAC 서명 쿠키, 세션 12시간)으로 보호되며 `DASHBOARD_PASSWORD` 가 비어 있으면 **라우트 자체가 열리지 않는다**.
 

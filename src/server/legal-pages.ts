@@ -44,6 +44,7 @@ const who = OPERATOR.name || '(운영자 성명 미기재)';
  * ⚠️ **앱 에셋의 사본이다.** 원본은 iOS `Assets.xcassets/logo.imageset/logo.svg` 이고,
  *    안드로이드가 같은 도형을 `res/drawable/moduwa_logo_brand.xml`(검정) ·
  *    `moduwa_logo_lime.xml`(라임) 으로 갖고 있다. 로고가 바뀌면 세 곳을 함께 고친다.
+ *    랜딩(landing-page.ts)은 이 상수를 그대로 가져다 쓴다 — 사본을 하나 더 만들지 않는다.
  *
  * ── 왜 <img> 가 아니라 인라인 SVG 인가
  *  이 서버는 정적 파일을 서빙하지 않는다(`/images/reviews/:name` 는 업로드 저장소다).
@@ -60,7 +61,7 @@ const who = OPERATOR.name || '(운영자 성명 미기재)';
  * ⚠️ 원본에는 여섯 개 path 가 모두 `id="Vector"` 로 들어 있다. HTML 안에서 중복 id 는
  *    문법 위반이라 떼어냈다(쓰는 곳도 없다). 에셋을 다시 받아올 때 함께 떼어낸다.
  */
-const LOGO = `<svg class="mark" viewBox="0 0 47 31.2" fill="none" role="img" aria-label="${OPERATOR.service}" xmlns="http://www.w3.org/2000/svg">
+export const LOGO = `<svg class="mark" viewBox="0 0 47 31.2" fill="none" role="img" aria-label="${OPERATOR.service}" xmlns="http://www.w3.org/2000/svg">
 <g transform="translate(0.000 1.702)"><path d="M1.80859 0.5H11.8398V8.52344H7.47949V11.4727H11.7705V14.0205H0.5V11.4717H4.93066V8.52344H0.545898V1.7627C0.545898 1.44154 0.657368 1.14696 0.910156 0.864258C1.19293 0.61127 1.48735 0.500034 1.80859 0.5ZM4.4541 3.02539C4.08306 3.02539 3.71215 3.11863 3.43848 3.39258C3.16524 3.66639 3.07227 4.03664 3.07227 4.40723V4.61523C3.07227 4.98603 3.1657 5.35613 3.43945 5.62988C3.7132 5.90359 4.08334 5.99707 4.4541 5.99707H9.26758V3.02539H4.4541Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
 <g transform="translate(14.110 1.771)"><path d="M11.7705 11.3789V13.9287H7.34082V17.4307H4.79102V13.9287H0.5V11.3789H11.7705ZM1.83203 0.5H11.7246V3.00195H4.47656C4.0765 3.00201 3.70658 3.14274 3.44727 3.46973C3.21819 3.75884 3.11474 4.11625 3.0957 4.49805L3.09375 4.52539L3.0957 4.55273C3.11646 4.90575 3.22823 5.23091 3.43555 5.51367C3.68849 5.85939 4.05949 6.02045 4.47656 6.02051H11.7246V8.52344H0.592773V1.7627C0.592855 1.3761 0.716103 1.09433 0.948242 0.873047L0.957031 0.864258L0.964844 0.855469C1.18964 0.620097 1.46624 0.500095 1.83203 0.5Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>
 <g transform="translate(28.490 3.533)"><path d="M5.04199 10.2451L5.21387 10.3057L5.38379 10.2412L6.38965 9.8623V11.4727H9.91504V14.0205H0.5V11.4727H3.84082V9.82227L5.04199 10.2451ZM15.4131 0.5V4.4668H18.0117V7.01562H15.4131V10.8428H12.8643V0.5H15.4131Z" fill="currentColor" stroke="currentColor" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round"/></g>

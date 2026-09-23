@@ -9,6 +9,7 @@ import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
 import { accountDeletionPage, privacyPage, supportPage, termsPage } from './legal-pages';
+import { landingAsset, landingPage } from './landing-page';
 import { toHttps } from './image-url';
 import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
@@ -66,6 +67,29 @@ export function buildApp(): Hono<AppEnv> {
   }));
 
   // 공개 엔드포인트 (인증 불필요)
+  // 루트는 **둘이 함께 산다**: 브라우저(Accept 에 text/html)면 랜딩 페이지, 아니면 기존 API 안내 JSON.
+  //  moduwa.app 이 이 서버를 가리켜 사람이 여는 첫 화면이 여기다(landing-page.ts). JSON 을 없애지
+  //  않는 것은 curl·모니터링처럼 `/` 를 부르던 쪽이 조용히 HTML 을 받지 않게 하기 위함이다.
+  //  ⚠️ 판별은 Accept 만 본다(User-Agent 가 아니다). 브라우저는 문서 요청에 늘 text/html 을 싣는다.
+  app.get('/', (c, next) => {
+    if (!(c.req.header('accept') ?? '').includes('text/html')) return next();
+    c.header('Cache-Control', 'public, max-age=300');
+    c.header('Vary', 'Accept');
+    return c.html(landingPage({
+      origin: config.web.origin,
+      appStoreUrl: config.web.appStoreUrl,
+      playStoreUrl: config.web.playStoreUrl,
+    }));
+  });
+  // 랜딩 자산(표지 사진). 이름은 목록에 있는 것만 — URL 의 ?v=<해시> 가 바뀌면 새 파일이라 영구 캐시.
+  app.get('/assets/landing/:name', (c) => {
+    const asset = landingAsset(c.req.param('name'));
+    if (!asset) return c.notFound();
+    return c.body(asset.body, 200, {
+      'Content-Type': asset.mime,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+  });
   app.get('/', (c) => c.json({
     name: 'moduwa tourism data API',
     version: '1',
@@ -120,6 +144,7 @@ export function buildApp(): Hono<AppEnv> {
       '',
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
+      'GET /  (브라우저로 열면 랜딩 페이지 · 그 밖에는 이 JSON)',
       'GET /p/:contentId  (장소 공유 대체 페이지 — 인증 불필요)',
       'GET /privacy · /terms · /support  (개인정보 처리방침 · 이용약관 · 고객 지원 — 인증 불필요)',
       'GET /delete-account  (계정 및 데이터 삭제 요청 — 인증 불필요)',
@@ -333,8 +358,8 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   //  앱스토어가 로그인 없이 접근되는 공개 URL 을 요구한다(legal-pages.ts 상단).
   app.get('/privacy', (c) => c.html(privacyPage()));
   app.get('/terms', (c) => c.html(termsPage()));
-  //  App Store Connect 의 Support URL 이 가리킨다. 루트(/)는 API JSON 이라 쓸 수 없다 —
-  //  심사자가 JSON 을 보면 메타데이터 리젝이다.
+  //  App Store Connect 의 Support URL 이 가리킨다. 루트(/)는 이제 랜딩이지만 지원 URL 로는 쓰지 않는다 —
+  //  심사자는 연락처와 탈퇴 경로를 찾는데 랜딩에는 그것이 없다(예전에는 루트가 JSON 이라 더더욱 못 썼다).
   app.get('/support', (c) => c.html(supportPage()));
 
   //  계정·데이터 삭제 요청 페이지 — 구글 플레이 콘솔의 "계정 삭제 요청 URL" 이 가리킨다
