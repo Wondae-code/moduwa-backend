@@ -9,6 +9,7 @@ import { cors } from 'hono/cors';
 import { config } from '../config';
 import { type PartyKind, type RecommendInput, recommend, weights } from './recommend';
 import { accountDeletionPage, privacyPage, supportPage, termsPage } from './legal-pages';
+import { landingPage } from './landing-page';
 import { toHttps } from './image-url';
 import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
@@ -66,7 +67,10 @@ export function buildApp(): Hono<AppEnv> {
   }));
 
   // 공개 엔드포인트 (인증 불필요)
-  app.get('/', (c) => c.json({
+  //  루트(/)는 사람이 여는 moduwa.app 첫 화면이라 랜딩 페이지를 뱉고, 엔드포인트 목록은 /api 로 옮겼다.
+  //  앱은 루트를 부르지 않는다(API 는 Railway 기본 도메인의 /v1/* 로 간다).
+  app.get('/', (c) => c.html(landingPage()));
+  app.get('/api', (c) => c.json({
     name: 'moduwa tourism data API',
     version: '1',
     docs: 'GET /v1/* (요청 헤더에 Authorization: Bearer <API_KEY> 필요)',
@@ -120,6 +124,7 @@ export function buildApp(): Hono<AppEnv> {
       '',
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
+      'GET /  (랜딩 페이지 — 인증 불필요)',
       'GET /p/:contentId  (장소 공유 대체 페이지 — 인증 불필요)',
       'GET /privacy · /terms · /support  (개인정보 처리방침 · 이용약관 · 고객 지원 — 인증 불필요)',
       'GET /delete-account  (계정 및 데이터 삭제 요청 — 인증 불필요)',
@@ -333,8 +338,8 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
   //  앱스토어가 로그인 없이 접근되는 공개 URL 을 요구한다(legal-pages.ts 상단).
   app.get('/privacy', (c) => c.html(privacyPage()));
   app.get('/terms', (c) => c.html(termsPage()));
-  //  App Store Connect 의 Support URL 이 가리킨다. 루트(/)는 API JSON 이라 쓸 수 없다 —
-  //  심사자가 JSON 을 보면 메타데이터 리젝이다.
+  //  App Store Connect 의 Support URL 이 가리킨다. 루트(/)는 아이콘과 스토어 버튼뿐인 랜딩이라
+  //  문의 안내를 대신할 수 없다 — 지원 URL 은 계속 여기를 가리킨다.
   app.get('/support', (c) => c.html(supportPage()));
 
   //  계정·데이터 삭제 요청 페이지 — 구글 플레이 콘솔의 "계정 삭제 요청 URL" 이 가리킨다

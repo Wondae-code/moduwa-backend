@@ -118,7 +118,7 @@ export const config = {
   // ── 웹 (moduwa.app — 유니버설 링크의 기반) ──
   //  루트 도메인을 Railway 커스텀 도메인으로 API 서버에 붙인다. 서버가
   //  /.well-known/apple-app-site-association 과 초대 대체 페이지(/i/:code)를 직접 서빙한다 —
-  //  웹서버를 따로 두지 않는 것이 의도다(재설정 링크·랜딩도 나중에 이 위에 올라간다).
+  //  웹서버를 따로 두지 않는 것이 의도다(랜딩 `/` 도 이 서버가 뱉는다 — landing-page.ts).
   web: {
     origin: process.env.PUBLIC_WEB_ORIGIN?.trim() || 'https://moduwa.app',
     // AASA 의 appID 목록: "TEAMID.번들ID" 형태. **비우면 라우트가 404** — 앱 팀의 Team ID 를
@@ -127,10 +127,12 @@ export const config = {
     // Android App Links 용. 구글 로그인 때 쓴 서명 지문(SHA-256)과 패키지명.
     androidPackage: process.env.ANDROID_PACKAGE?.trim() ?? '',
     androidCertSha256: list('ANDROID_CERT_SHA256'),
-    // 앱 미설치자 대체 페이지의 스토어 버튼. 출시 전에는 비워 두면 그 스토어만 숨는다.
-    //  둘 다 비면 버튼이 아예 안 나온다.
-    appStoreUrl: process.env.APP_STORE_URL?.trim() ?? '',
-    playStoreUrl: process.env.PLAY_STORE_URL?.trim() ?? '',
+    // 스토어 버튼 — 랜딩(/)과 앱 미설치자 대체 페이지(/p, /i)가 쓴다.
+    //  두 스토어 모두 출시돼 공개 주소를 기본값으로 둔다(환경변수가 있으면 그쪽이 이긴다).
+    //  ⚠️ 한때 PLAY_STORE_URL 이 운영에 비어 있어, 출시 뒤에도 안드로이드에 "준비 중" 이 떴다.
+    appStoreUrl: process.env.APP_STORE_URL?.trim() || 'https://apps.apple.com/kr/app/id6806744787',
+    playStoreUrl: process.env.PLAY_STORE_URL?.trim()
+      || 'https://play.google.com/store/apps/details?id=com.waasegye.moduwa',
   },
 
   // ── 푸시 알림(APNs) ──
