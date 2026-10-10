@@ -33,6 +33,7 @@ type Slot = (typeof DAY_TEMPLATE)[number];
 
 // TourAPI contenttypeid — 12 관광지 / 14 문화시설 / 15 축제 / 28 레포츠 / 32 숙박 / 38 쇼핑 / 39 음식
 const SPOT_TYPES = ['12', '14', '15', '28'];
+const FESTIVAL_TYPE = '15';
 const FOOD_TYPE = '39';
 const STAY_TYPE = '32';
 
@@ -154,7 +155,11 @@ type Candidate = {
   has_access_info: boolean;
   /** 인기순위 가산점. **관광 슬롯에서만** 더한다 — 아래 주석 참고. */
   hub_bonus: number;
-  tag_hits: number; restdate: string | null;
+  tag_hits: number;
+  /** 휴무일 원문. 유형마다 키가 달라 전부 이어 붙인 것이다(collectCandidates 주석). */
+  restdate: string | null;
+  /** 축제 기간(YYYYMMDD). 축제(15)에만 있다 — festivalOn 참고. */
+  event_start: string | null; event_end: string | null;
   score: number;
 };
 
@@ -227,13 +232,23 @@ async function collectCandidates(
            coalesce((select count(*) from review_tags rt
                        join reviews r on r.id = rt.review_id
                       where r.content_id = b.contentid and rt.tag_code = any($4)), 0)::int as tag_hits,
-           (select k.intro_raw->>'restdate' from kor_detail k where k.content_id = b.contentid) as restdate,
+           -- 휴무일은 유형마다 키가 다르다 — 관광지 restdate · 문화시설 restdateculture ·
+           --  레포츠 restdateleports · 쇼핑 restdateshopping · 음식점 restdatefood.
+           --  ⚠️ 예전에는 restdate 하나만 읽어서 **관광지 말고는 휴무를 전혀 몰랐다.** 매주 쉬는
+           --     문화시설 1,028곳 · 음식점 3,378곳(미조사 포함) · 레포츠 27곳이 쉬는 날에도 배치될
+           --     수 있었다(2026-10-10 실측: 39개 지역 2박 일정에 휴무일 배치 25건, 전부 이 네 키에서).
+           --  줄바꿈으로 잇는 것은 closedWeekdays 가 한 키의 문장을 다음 키로 이어 읽지 않게 하려는 것이다.
+           concat_ws(chr(10), d.intro_raw->>'restdate', d.intro_raw->>'restdateculture',
+                     d.intro_raw->>'restdateleports', d.intro_raw->>'restdateshopping',
+                     d.intro_raw->>'restdatefood') as restdate,
+           d.intro_raw->>'eventstartdate' as event_start, d.intro_raw->>'eventenddate' as event_end,
            -- 018 과 같은 정규화. barrier_free 에는 같은 이름의 다른 contentid 가 있다
            --  (예: '롯데백화점 본점' 132668 · 2902442). 그대로 두면 한 코스에 같은 곳이 두 번 나온다.
            regexp_replace(lower(b.title), '[^0-9a-z가-힣]', '', 'g') as norm_name,
            true as has_access_info,
            0::numeric as score, 0::numeric as hub_bonus
       from barrier_free b
+      left join kor_detail d on d.content_id = b.contentid
      where b.ldong_regn_cd = $1
        and ($2::text[] is null or b.ldong_signgu_cd = any($2))
        and b.contenttypeid = any($3)
@@ -270,11 +285,16 @@ async function collectCandidates(
            coalesce((select count(*) from review_tags rt
                        join reviews r on r.id = rt.review_id
                       where r.content_id = p.content_id and rt.tag_code = any($4)), 0)::int as tag_hits,
-           (select k.intro_raw->>'restdate' from kor_detail k where k.content_id = p.content_id) as restdate,
+           -- 위 갈래와 같은 식이다. 음식점이라 실제로 채워지는 것은 restdatefood 다.
+           concat_ws(chr(10), d.intro_raw->>'restdate', d.intro_raw->>'restdateculture',
+                     d.intro_raw->>'restdateleports', d.intro_raw->>'restdateshopping',
+                     d.intro_raw->>'restdatefood') as restdate,
+           null::text as event_start, null::text as event_end,
            regexp_replace(lower(p.title), '[^0-9a-z가-힣]', '', 'g') as norm_name,
            false as has_access_info,
            0::numeric as score, 0::numeric as hub_bonus
       from unsurveyed_dining p
+      left join kor_detail d on d.content_id = p.content_id
      where p.ldong_regn_cd = $1
        and ($2::text[] is null or p.ldong_signgu_cd = any($2))
   `, [region.regn, region.signgu, [...wantTypes], tagCodes.length ? tagCodes : ['__none__']])).rows;
@@ -312,16 +332,43 @@ async function collectCandidates(
   return rows;
 }
 
-/** `매주 X요일` 만 읽는다 — 나머지는 자유 텍스트라 v1 에서 판단하지 않는다(= 중립). */
+/**
+ * `매주 X요일` 만 읽는다 — 나머지는 자유 텍스트라 v1 에서 판단하지 않는다(= 중립).
+ * 읽는 모양: 매주 월요일 · 매주 월,화요일 · 매주 토요일, 일요일 · 매주 토요일~일요일 ·
+ * 매주 월~금요일 · 매주 주말.
+ *
+ *  ⚠️ **요일 글자는 요일 이름 자리에 있는 것만 센다.** 예전에는 매치를 한 글자씩 훑어서
+ *     '요일' 의 '일' 까지 일요일로 셌다 — `매주 월요일` 이 일·월 휴무가 되어, 주간 휴무가 있는
+ *     관광지 499곳이 **일요일 일정에서 통째로 빠졌다**(2026-10-10 실측). `1월 1일` 의 '월'·'일',
+ *     `공휴일` 의 '일' 도 같은 함정이라, 앞에 한글이 붙었거나 뒤에 '요일' 아닌 한글이 붙은
+ *     글자는 요일로 보지 않고 '요일' 이 하나도 없는 묶음은 버린다.
+ *  ⚠️ `매주` 뒤의 한 구절만 본다. 괄호·슬래시·※·줄바꿈 뒤는 단서("월요일이 공휴일이면 다음
+ *     평일")나 다른 규칙이다. `매주 셋째주 일요일` 처럼 달 단위인 것도 매주가 아니다.
+ */
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
+const DAY = '(?<![가-힣])[월화수목금토일](?:요일|(?![가-힣]))';
+/** 요일을 쉼표·가운뎃점(나열) 또는 물결(범위)로 이은 묶음 — "월,화요일" · "토요일~일요일" */
+const DAY_RUN = new RegExp(`${DAY}(?:\\s*[,·~∼～-]\\s*${DAY})*`, 'g');
 export function closedWeekdays(restdate: string | null): Set<number> {
   const out = new Set<number>();
   if (!restdate) return out;
-  // "매주 월요일", "매주 월,화요일", "매주 월요일 휴무" 등을 포괄한다.
-  for (const m of restdate.matchAll(/매주\s*([월화수목금토일][,·\s]*)+요일/g)) {
-    for (const ch of m[0]) {
-      const i = WEEKDAYS.indexOf(ch);
-      if (i >= 0) out.add(i);
+  for (const m of restdate.matchAll(/매주([^/(<※\n]*)/g)) {
+    const clause = m[1]!.split(/첫째|둘째|셋째|넷째|다섯째|마지막|격주|매월/)[0]!;
+    if (/^\s*주말/.test(clause)) { out.add(6); out.add(0); }
+    for (const run of clause.matchAll(DAY_RUN)) {
+      if (!run[0].includes('요일')) continue;
+      // 짝수 칸이 요일, 홀수 칸이 그 사이의 기호다.
+      const parts = run[0].split(/\s*([,·~∼～-])\s*/);
+      let prev: number | null = null;
+      for (let k = 0; k < parts.length; k += 2) {
+        const d = WEEKDAYS.indexOf(parts[k]![0]!);
+        // 범위는 사이의 요일을 채운다. 주를 넘어가는 범위(일요일~화요일)도 있다.
+        if (prev != null && prev !== d && /[~∼～-]/.test(parts[k - 1]!)) {
+          for (let i: number = (prev + 1) % 7; i !== d; i = (i + 1) % 7) out.add(i);
+        }
+        out.add(d);
+        prev = d;
+      }
     }
   }
   return out;
@@ -354,10 +401,26 @@ function fitsSlot(c: Candidate, slot: Slot): boolean {
   if (!slotTypes(slot).includes(c.contenttypeid)) return false;
   // 무장애 조사를 받지 않은 곳은 **식사·카페 자리에만** 들어간다. 볼거리는 부족하지 않으므로
   //  굳이 접근성을 모르는 곳을 섞을 이유가 없다(collectCandidates 주석).
-  if (!c.has_access_info && slot === 'spot') return false;
+  //  ⚠️ 볼거리 판정은 여기서 끝낸다 — 아래 카페 조건이 볼거리에 걸리면 안 된다. 카카오가
+  //     관광지 대신 같은 자리의 카페를 매칭한 곳이 있어서(is_cafe), 예전에는 뮤지엄산·오설록
+  //     티뮤지엄·낙산해수욕장 같은 볼거리 103곳이 어떤 일정에도 나오지 않았다(2026-10-10 실측).
+  if (slot === 'spot') return c.has_access_info;
   if (slot === 'cafe') return c.is_cafe;
-  if (c.is_cafe) return false;   // 식사 슬롯에 카페가 들어가지 않게
-  return true;
+  return !c.is_cafe;   // 식사 슬롯에 카페가 들어가지 않게
+}
+
+/**
+ * 축제가 그날 열리는가. 축제가 아니면 늘 true 다.
+ *
+ *  ⚠️ **기간을 모르면 넣지 않는다.** "모르는 것에 벌점을 주지 않는다" 의 예외다 — 그 원칙은
+ *     인기·혼잡처럼 *얼마나 좋은가* 를 모를 때의 이야기이고, 축제는 *그날 있는가* 가 전부다.
+ *     예전에는 날짜를 보지 않아서 10/17 일정에 7/31~8/2 에 끝난 속초 칠링비치페스티벌이
+ *     들어갔다. 후보 7개가 전부 지난 행사였다(2026-10-10 실측).
+ */
+function festivalOn(c: Candidate, ymd: string): boolean {
+  if (c.contenttypeid !== FESTIVAL_TYPE) return true;
+  const s = c.event_start, e = c.event_end;
+  return s != null && e != null && /^\d{8}$/.test(s) && /^\d{8}$/.test(e) && s <= ymd && ymd <= e;
 }
 
 export type RecommendDay = {
@@ -476,6 +539,9 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
     }
   }
 
+  // 휴무 요일은 후보마다 한 번만 푼다 — 슬롯마다 다시 풀면 14일 일정에서 수십만 번 돈다.
+  const closedOn = new Map(all.map((c) => [c.contentid, closedWeekdays(c.restdate)]));
+
   // ── 날짜별 배치. 혼잡일에는 주요 명소(hub_rank 상위)를 피하고 가벼운 일정을 둔다.
   const used = new Set<string>();
   // contentid 와 별개로 **이름**도 막는다. 같은 곳이 다른 id 로 두 번 들어 있기 때문이다.
@@ -488,6 +554,7 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
     const rate = cong.get(date) ?? null;
     const busy = rate != null && rate >= busyThreshold;
     const dow = new Date(date).getDay();
+    const ymd = date.replace(/-/g, '');
     const items: RecommendDay['items'] = [];
     let prev: Candidate | null = stay;
     // 그날 이미 쓴 유형. 같은 유형이 반복되면 감점한다 — 하루가 통째로 '관광지 4곳' 이 되면
@@ -497,7 +564,8 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
     for (const slot of DAY_TEMPLATE) {
       const pick = all
         .filter((c) => !used.has(c.contentid) && !usedNames.has(c.norm_name) && fitsSlot(c, slot))
-        .filter((c) => !closedWeekdays(c.restdate).has(dow))   // 휴무일 제외
+        .filter((c) => !closedOn.get(c.contentid)?.has(dow))   // 휴무일 제외
+        .filter((c) => festivalOn(c, ymd))                     // 그날 열리지 않는 축제 제외
         .map((c) => {
           let s = c.score;
           // 인기순위는 볼거리를 고를 때만 쓴다(위 주석).
@@ -570,7 +638,9 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
       items.push({
         hasAccessInfo: pick.c.has_access_info,
         slot, contentID: pick.c.contentid, name: pick.c.title,
-        categoryLabel: pick.c.is_cafe ? '카페' : (TYPE_LABEL[pick.c.contenttypeid] ?? '기타'),
+        // 카페 자리에 놓인 것만 '카페' 다. 볼거리 중에도 카카오가 카페로 매칭한 곳이 있는데
+        //  (fitsSlot 주석), 오설록 티뮤지엄을 '카페' 로 띄우면 볼거리 칸에 카페가 온 것처럼 보인다.
+        categoryLabel: slot === 'cafe' ? '카페' : (TYPE_LABEL[pick.c.contenttypeid] ?? '기타'),
         // ⚠️ **http 인 채로 내보내면 iOS ATS 가 막아 사진만 조용히 안 뜬다.** 수집 원본의
         //    44%(숙소는 652곳 중 256곳)가 http 다. app.ts 의 다른 엔드포인트는 전부 이걸
         //    거치는데 이 파일만 빠져 있었다(2026-09-21).
