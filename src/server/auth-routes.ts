@@ -939,6 +939,9 @@ export function buildAuthRoutes(): Hono<AppEnv> {
       await client.query('delete from plan_members where author_id = $1', [authorId]);
       await client.query('delete from push_sends where author_id = $1', [authorId]);
       await client.query('delete from blocks where blocker_id = $1 or blocked_id = $1', [authorId]);
+      // 피드백은 본문·답장 이메일 모두 개인정보다(059). 탈퇴는 authors 행을 지우지 않으므로
+      //  FK 의 on delete cascade 가 돌지 않는다 — 여기서 직접 지운다.
+      await client.query('delete from feedback where author_id = $1', [authorId]);
 
       // ④ 좋아요를 지웠으니 후기의 카운터를 실제 값으로 맞춘다 — 안 하면 화면의 좋아요 수가
       //    실제보다 많아진다(댓글 삭제에서 겪은 것과 같은 문제).

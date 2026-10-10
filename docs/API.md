@@ -1290,6 +1290,7 @@ GET /v1/reviews?contentId=125984&visitorTag=visit_wheelchair
 | **기기 토큰** — 남으면 탈퇴한 사람 기기로 알림이 계속 갑니다 | |
 | 저장한 장소 · 좋아요(글·후기) · 차단 목록 | |
 | 개인 플랜(남은 멤버가 없는 플랜) | 공유 플랜 → 소유권 이전 |
+| 로그인한 상태로 보낸 피드백 | 로그인하지 않고 보낸 피드백(계정과 연결되지 않음 — 접수 후 1년에 삭제) |
 
 - 닉네임은 **`탈퇴한 사용자`**로 바뀝니다(`authors.nickname`과 `reviews.author_nm` 양쪽)
 - **공유 플랜은 가장 먼저 합류한 편집자에게 소유권이 넘어갑니다.** 아무도 없으면 삭제됩니다
@@ -1367,6 +1368,53 @@ DELETE /v1/blocks/:uuid        🔒 → 204   (없는 것도 204)
 앱이 이미 쓰고 있어 남겨 둔 경로입니다. `POST /v1/reports`에 `targetType: "review"`로 보낸 것과
 **같은 표·같은 행**에 쌓입니다 — 두 경로로 같은 후기를 신고하면 행이 둘이 되지 않습니다.
 새로 붙이는 화면은 `/v1/reports`를 쓰세요.
+
+## 피드백
+
+설계와 화면 구성은 [`docs/FEEDBACK.md`](FEEDBACK.md)에 있습니다.
+
+### POST /v1/feedback — 의견 보내기
+문의하기 · 장소 상세 · 여행 상세에서 여는 시트가 보냅니다. 성공 시 **201** `{ "id": 123 }`.
+
+**로그인하지 않아도 됩니다.** `X-Session-Token`이 있으면 그 계정이 함께 기록되고, 없으면 `deviceId`만 남습니다.
+낡은 토큰을 붙이면 다른 라우트와 같이 401 `session_expired`이니, 토큰을 지운 뒤 비로그인으로 다시 보내면 됩니다.
+
+```jsonc
+{ "category": "place",               // inquiry | place | plan
+  "targetId": "126508",              // place → contentId, plan → 플랜 id(uuid). inquiry 는 무시
+  "body": "엘리베이터가 공사 중이라 2층에 갈 수 없었어요.",
+  "replyEmail": "traveler@example.com",   // 선택. 빈 문자열은 "없음"
+  "deviceId": "8F3C…",               // 선택. 로그인 상태여도 보냅니다
+  "client": {                        // 선택. 보내는 순간 모은 기기 정보 — 서버는 키를 검사하지 않습니다
+    "platform": "ios", "appVersion": "1.1", "build": "160",
+    "osVersion": "26.0", "model": "iPhone17,1" } }
+```
+
+| 상황 | 응답 |
+|---|---|
+| 정상 | 201 `{ id }` |
+| 모르는 `category` | 400 `invalid_category` |
+| 본문이 비었거나 500자 초과 | 400 `invalid_body` |
+| `targetId` 형식이 틀림(장소 64자 초과 · 플랜이 uuid 아님) | 400 `invalid_target` |
+| 이메일 형식이 틀림 | 400 `invalid_email` |
+| `deviceId` 128자 초과 | 400 `invalid_deviceId` |
+| `client`가 객체가 아니거나 2KB 초과 | 400 `invalid_client` |
+| 같은 IP에서 10분에 10건 초과 | 429 `rate_limited` |
+
+- ⚠️ **글자 수는 화면에 보이는 글자로 셉니다.** 이모지 하나가 1자입니다. iOS `String.count`는 같은 단위지만, **Android `String.length`는 다릅니다**(이모지가 2자 이상) — `BreakIterator.getCharacterInstance()`로 세세요
+- **대상은 형식만 봅니다.** 그 사이 지워진 플랜에 대한 의견도 접수됩니다. 기기에만 있는 플랜(비로그인)은 서버 id가 없으니 `targetId`를 빼고 보내세요
+- **`client`는 그대로 저장합니다.** 항목을 늘려도 서버를 고치지 않아도 됩니다. 시트에 보여 주는 정보 줄과 같은 값에서 만드세요
+- 보낸 피드백을 앱에서 다시 보는 경로는 **없습니다.** `deviceId`는 신원이 아니라서, 그것으로 "내 피드백"을 열면 남의 것을 볼 수 있게 됩니다
+- 보관 기간은 **접수 후 1년**입니다. 지나면 서버가 지웁니다
+
+### 피드백 운영 화면 (대시보드)
+`/dashboard` → **피드백** 탭.
+
+- 카테고리 · 대상(장소는 이름, 플랜은 id만) · 보낸 사람(닉네임 또는 비로그인) · 기기 정보 · 본문 · 답장 주소를 한 장에 보여줍니다
+- 「답변함」·「닫기」로 처리 상태(`new` → `answered` → `closed`)를 바꿉니다. 되돌릴 수 있습니다
+- 같은 계정·기기에서 온 다른 피드백 **건수**를 보여줍니다. `deviceId` 값 자체는 화면에 내보내지 않습니다
+- 답장 주소가 Apple 가리기 주소(`@privaterelay.appleid.com`)면 표시가 붙습니다 — Apple 개발자 계정에 보내는 도메인을 등록해야 답장이 도착합니다
+- 탭에 새 피드백 건수 배지가 뜹니다
 
 ## 푸시 알림 (APNs · Firebase Cloud Messaging)
 

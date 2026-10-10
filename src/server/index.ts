@@ -2,8 +2,11 @@
 import { serve } from '@hono/node-server';
 import { config } from '../config';
 import { buildApp } from './app';
+import { scheduleFeedbackPurge } from './feedback';
 
 const app = buildApp();
+// 피드백 보관 기간(접수 후 1년)을 지킨다. 개인정보 처리방침 4항이 약속한 것이다.
+scheduleFeedbackPurge();
 const port = config.api.port;
 
 serve({ fetch: app.fetch, port }, (info) => {

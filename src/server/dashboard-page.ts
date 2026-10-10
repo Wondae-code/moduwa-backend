@@ -204,6 +204,7 @@ export function dashboardPage(): string {
     <button class="tab" data-tab="tables">테이블</button>
     <button class="tab" data-tab="images">사진</button>
     <button class="tab" data-tab="reports">신고<span class="badge" id="rbadge"></span></button>
+    <button class="tab" data-tab="feedback">피드백<span class="badge" id="fbadge"></span></button>
     <button class="tab" data-tab="sql">SQL</button>
   </div>
   <button class="act" id="refresh">새로고침</button>
@@ -260,6 +261,24 @@ export function dashboardPage(): string {
       <span class="hint" id="rinfo"></span>
     </div>
     <div id="rlist"><div class="loading">불러오는 중…</div></div>
+  </section>
+  <section id="feedback">
+    <div class="row">
+      <select id="fstatus">
+        <option value="new">새 것만</option>
+        <option value="answered">답변함</option>
+        <option value="closed">닫음</option>
+        <option value="all">전체</option>
+      </select>
+      <select id="fcat">
+        <option value="">모든 곳</option>
+        <option value="inquiry">문의하기</option>
+        <option value="place">장소 상세</option>
+        <option value="plan">여행 상세</option>
+      </select>
+      <span class="hint" id="finfo"></span>
+    </div>
+    <div id="flist"><div class="loading">불러오는 중…</div></div>
   </section>
   <section id="sql">
     <textarea id="q" spellcheck="false" placeholder="select ... 또는 with ... — 읽기 전용, 한 문장만"></textarea>
@@ -334,6 +353,7 @@ for (var i = 0; i < tabs.length; i++) {
     if (name === 'tables' && !window.__tablesReady) loadTableList();
     if (name === 'images') loadImages();
     if (name === 'reports') loadReports();
+    if (name === 'feedback') loadFeedback();
   });
 }
 
@@ -548,6 +568,130 @@ for (var ri = 0; ri < rfilters.length; ri++) {
   document.getElementById(rfilters[ri]).addEventListener('change', loadReports);
 }
 
+// ── 피드백 운영(059) ──
+//  서버는 device_id 를 주지 않는다 — "같은 사람·기기에서 온 것이 몇 건" 만 받는다.
+var CAT_LABEL = { inquiry: '문의하기', place: '장소 상세', plan: '여행 상세' };
+var STATUS_LABEL = { 'new': '새 것', answered: '답변함', closed: '닫음' };
+var RELAY_DOMAIN = '@privaterelay.appleid.com';
+
+//  client 는 앱이 보낸 객체 그대로다(서버가 키를 검사하지 않는다). 아는 키만 글자로 꺼낸다.
+function clientLine(cl) {
+  if (!cl || typeof cl !== 'object') return '기기 정보 없음';
+  var s = function (k) {
+    var v = cl[k];
+    return (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
+  };
+  var parts = [];
+  if (s('appVersion')) parts.push(s('appVersion') + (s('build') ? ' (' + s('build') + ')' : ''));
+  var platform = s('platform') === 'ios' ? 'iOS' : (s('platform') === 'android' ? 'Android' : s('platform'));
+  var os = [platform, s('osVersion')].filter(Boolean).join(' ');
+  if (os) parts.push(os);
+  if (s('model')) parts.push(s('model'));
+  return parts.length ? parts.join(' · ') : '기기 정보 없음';
+}
+
+function targetLine(f) {
+  if (f.category === 'inquiry') return '';
+  //  기기에만 있는 플랜(비로그인)은 id 가 없다 — 빠뜨린 것이 아니라 서버가 모르는 플랜이다.
+  if (!f.targetId) return '<div class="who">대상 id 없음</div>';
+  var h = '<div class="who">';
+  if (f.placeTitle) h += esc(f.placeTitle) + ' · ';
+  h += '<code>' + esc(f.targetId) + '</code>';
+  if (f.targetGone) h += ' <span class="tag gone">' + (f.category === 'plan' ? '플랜 없음' : '장소 없음') + '</span>';
+  return h + '</div>';
+}
+
+function loadFeedback() {
+  var status = document.getElementById('fstatus').value;
+  var cat = document.getElementById('fcat').value;
+  var q = '/feedback?status=' + encodeURIComponent(status)
+        + (cat ? '&category=' + encodeURIComponent(cat) : '');
+  document.getElementById('flist').innerHTML = '<div class="loading">불러오는 중…</div>';
+  api(q).then(renderFeedback).catch(function (e) {
+    document.getElementById('flist').innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  });
+}
+
+function renderFeedback(d) {
+  document.getElementById('fbadge').textContent = d.counts.open > 0 ? String(d.counts.open) : '';
+  document.getElementById('finfo').textContent =
+    '새 것 ' + fmt(d.counts.open) + ' / 전체 ' + fmt(d.counts.total);
+
+  if (!d.items.length) {
+    document.getElementById('flist').innerHTML =
+      '<div class="panel" style="padding:22px;text-align:center;color:var(--muted)">피드백이 없습니다.</div>';
+    return;
+  }
+  var h = '';
+  for (var i = 0; i < d.items.length; i++) {
+    var f = d.items[i];
+    h += '<div class="rep' + (f.status === 'closed' ? ' done' : '') + '">';
+    h += '<div class="top">';
+    h += '<span class="cnt">#' + f.id + '</span>';
+    h += '<span class="tag">' + esc(CAT_LABEL[f.category] || f.category) + '</span>';
+    h += '<span class="tag' + (f.status === 'new' ? ' reason' : '') + '">'
+       + esc(STATUS_LABEL[f.status] || f.status) + '</span>';
+    h += '<span class="spacer"></span>';
+    h += '<span class="who">' + ago(f.createdAt) + '</span>';
+    h += '</div>';
+
+    h += targetLine(f);
+    h += '<div class="who">'
+       + (f.authorNickname
+           ? esc(f.authorNickname) + (f.authorUuid ? ' · <code>' + esc(f.authorUuid.slice(0, 8)) + '</code>' : '')
+           : '비로그인')
+       + (f.sameSender > 0 ? ' · 같은 계정·기기에서 ' + f.sameSender + '건 더' : '')
+       + ' · ' + esc(clientLine(f.client)) + '</div>';
+
+    h += '<div class="body">' + esc(f.body) + '</div>';
+
+    if (f.replyEmail) {
+      h += '<div class="who">답장 <a href="mailto:' + encodeURIComponent(f.replyEmail) + '">'
+         + esc(f.replyEmail) + '</a>';
+      //  가리기 주소는 보내는 도메인을 Apple 에 등록해야 받는다 — 안 하면 답장이 반송된다.
+      if (f.replyEmail.slice(-RELAY_DOMAIN.length) === RELAY_DOMAIN) {
+        h += ' <span class="tag reason">Apple 가리기 주소</span>';
+      }
+      h += '</div>';
+    } else {
+      h += '<div class="who">답장 주소 없음</div>';
+    }
+
+    h += '<div class="acts" data-id="' + f.id + '">';
+    if (f.status === 'new') {
+      h += '<button class="act" data-status="answered">답변함</button>';
+      h += '<button class="act" data-status="closed">닫기</button>';
+    } else if (f.status === 'answered') {
+      h += '<button class="act" data-status="closed">닫기</button>';
+      h += '<button class="act" data-status="new">새 것으로</button>';
+    } else {
+      h += '<button class="act" data-status="new">다시 열기</button>';
+    }
+    h += '</div></div>';
+  }
+  document.getElementById('flist').innerHTML = h;
+}
+
+document.getElementById('flist').addEventListener('click', function (e) {
+  var btn = e.target.closest('button[data-status]');
+  if (!btn) return;
+  btn.disabled = true;
+  api('/feedback/status', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: Number(btn.parentNode.getAttribute('data-id')), status: btn.getAttribute('data-status') })
+  }).then(loadFeedback).catch(function (err) { btn.disabled = false; alert(err.message); });
+});
+
+// 신고와 같은 이유로 첫 진입에서 배지를 채운다 — 탭을 열어야만 알 수 있으면 놓친다.
+api('/feedback?status=new&limit=1').then(function (d) {
+  document.getElementById('fbadge').textContent = d.counts.open > 0 ? String(d.counts.open) : '';
+}).catch(function () {});
+
+['fstatus', 'fcat'].forEach(function (id) {
+  document.getElementById(id).addEventListener('change', loadFeedback);
+});
+
 // ── 개요 ──
 function renderOverview(d) {
   var t = d.totals;
@@ -628,6 +772,7 @@ document.getElementById('refresh').addEventListener('click', function () {
   if (on === 'overview') loadOverview();
   else if (on === 'tables') loadTable();
   else if (on === 'reports') loadReports();
+  else if (on === 'feedback') loadFeedback();
 });
 
 // ── 테이블 브라우저 ──

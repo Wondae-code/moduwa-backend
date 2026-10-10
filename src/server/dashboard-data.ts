@@ -467,6 +467,105 @@ export async function resolveReports(
   return res.rowCount ?? 0;
 }
 
+// ── 피드백 운영(059) ─────────────────────────────────────────────────────────
+//
+//  ⚠️ **device_id 를 내보내지 않는다.** 화면에 필요한 것은 "같은 기기에서 온 것이 몇 건인가" 뿐이라
+//     여기서 세어 숫자만 준다. 값이 화면에 보이면 캡처 한 장으로 그 기기의 묶음이 밖으로 나간다.
+//
+//  ⚠️ 플랜은 id 와 "아직 있는가" 만 준다. 플랜은 멤버만 보는 개인 데이터다 — 운영 화면이라고
+//     내용을 펼쳐 보이지 않는다. 장소는 공개 정보라 이름까지 붙인다.
+
+export const FEEDBACK_STATUSES = ['new', 'answered', 'closed'] as const;
+export type FeedbackStatus = (typeof FEEDBACK_STATUSES)[number];
+
+export type FeedbackItem = {
+  id: number;
+  category: string;
+  targetId: string | null;
+  placeTitle: string | null;   // category = place 일 때 barrier_free 의 이름
+  targetGone: boolean;         // 대상 id 가 있는데 찾을 수 없다
+  body: string;
+  replyEmail: string | null;
+  client: Record<string, unknown> | null;
+  status: string;
+  createdAt: string;
+  authorNickname: string | null; // null = 비로그인으로 보냈다
+  authorUuid: string | null;
+  sameSender: number;          // 같은 계정 또는 같은 기기에서 온 다른 피드백 수
+};
+
+export async function feedbackList(
+  opts: { status?: string; category?: string; limit?: number } = {},
+): Promise<FeedbackItem[]> {
+  const limit = Math.min(200, Math.max(1, opts.limit ?? 100));
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (opts.status) { params.push(opts.status); where.push(`f.status = $${params.length}`); }
+  if (opts.category) { params.push(opts.category); where.push(`f.category = $${params.length}`); }
+  const wsql = where.length ? `where ${where.join(' and ')}` : '';
+
+  return (await readOnlyQuery<{
+    id: number; category: string; target_id: string | null; place_title: string | null;
+    target_gone: boolean; body: string; reply_email: string | null;
+    client: Record<string, unknown> | null; status: string; created_at: string;
+    author_nickname: string | null; author_uuid: string | null; same_sender: number;
+  }>(
+    `select f.id, f.category, f.target_id, b.title as place_title,
+            (f.target_id is not null and case f.category
+               when 'place' then b.contentid is null
+               when 'plan'  then not exists (select 1 from plans p where p.id::text = f.target_id)
+               else false end) as target_gone,
+            f.body, f.reply_email, f.client, f.status,
+            to_char(f.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
+            a.nickname as author_nickname, a.uuid::text as author_uuid,
+            (select count(*)::int from feedback o
+              where o.id <> f.id
+                and ((f.author_id is not null and o.author_id = f.author_id)
+                  or (f.device_id is not null and o.device_id = f.device_id))) as same_sender
+       from feedback f
+       left join authors a on a.id = f.author_id
+       left join barrier_free b on f.category = 'place' and b.contentid = f.target_id
+       ${wsql}
+      -- 새 것부터, 그 안에서는 최근 것부터.
+      order by (f.status = 'new') desc, f.created_at desc
+      limit ${limit}`,
+    params,
+  )).rows.map((r) => ({
+    id: r.id,
+    category: r.category,
+    targetId: r.target_id,
+    placeTitle: r.place_title,
+    targetGone: Boolean(r.target_gone),
+    body: r.body,
+    replyEmail: r.reply_email,
+    client: r.client,
+    status: r.status,
+    createdAt: r.created_at,
+    authorNickname: r.author_nickname,
+    authorUuid: r.author_uuid,
+    sameSender: r.same_sender,
+  }));
+}
+
+export type FeedbackCounts = { open: number; total: number };
+
+export async function feedbackCounts(): Promise<FeedbackCounts> {
+  return (await readOnlyQuery<FeedbackCounts>(
+    `select count(*) filter (where status = 'new')::int as open, count(*)::int as total from feedback`,
+  )).rows[0] ?? { open: 0, total: 0 };
+}
+
+/**
+ * 피드백의 처리 상태를 바꾼다. 바뀐 건수를 돌려준다(없는 id 면 0).
+ *
+ * ⚠️ resolveReports 와 같은 이유로 readOnlyQuery 를 쓰지 않는다. 본문은 건드리지 않는다.
+ */
+export async function setFeedbackStatus(id: number, status: FeedbackStatus): Promise<number> {
+  const res = await pool.query(
+    'update feedback set status = $2, updated_at = now() where id = $1', [id, status]);
+  return res.rowCount ?? 0;
+}
+
 // ── 수집한 장소 사진 갤러리 ─────────────────────────────────────────────────
 //
 //  수집 대시보드의 숫자는 "몇 건 받았나" 까지만 말해 준다. 사진이 실제로 그 장소의 것인지,

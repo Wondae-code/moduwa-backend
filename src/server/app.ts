@@ -15,6 +15,7 @@ import { pushToAuthor, quote } from './push';
 import { query, withTransaction } from '../db';
 import { buildDashboard } from './dashboard';
 import { buildAuthRoutes } from './auth-routes';
+import { buildFeedbackRoutes } from './feedback';
 import type { AppEnv } from './middleware';
 import { apiKeyAuth, rateLimit, sessionAuth } from './middleware';
 
@@ -121,6 +122,8 @@ export function buildApp(): Hono<AppEnv> {
       '🔒 POST /v1/reviews/:reviewId/report  {reason, detail?}  (구 경로 — /v1/reports 와 같은 표에 쌓인다)',
       '🔒 POST /v1/devices  {token, platform?, environment, bundleId?}',
       '🔒 DELETE /v1/devices/:token',
+      'POST /v1/feedback  {category, body, targetId?, replyEmail?, deviceId?, client?}'
+        + '  (category: inquiry · place · plan — 로그인 선택)',
       '',
       'POST /v1/auth/google · /v1/auth/apple · /v1/auth/kakao  {idToken, deviceId?, nickname?, accessFeatures?}',
       '',
@@ -370,6 +373,9 @@ ${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
 
   // ── 계정(024·028·029) ───────────────────────────────────────────────────────
   v1.route('/auth', buildAuthRoutes());
+
+  // ── 피드백(059) — 비로그인도 보낼 수 있다 ──────────────────────────────────
+  v1.route('/feedback', buildFeedbackRoutes());
 
   const PET_COLS = `contentid, title, contenttypeid, addr1, addr2, tel, mapx, mapy,
     firstimage, firstimage2, ldong_regn_cd, ldong_signgu_cd,

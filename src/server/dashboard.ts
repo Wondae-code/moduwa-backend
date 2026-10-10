@@ -9,8 +9,9 @@ import {
   loginAttemptsLeft, recordFailedLogin, requireLogin, setSessionCookie,
 } from './dashboard-auth';
 import {
-  browse, imageRegions, imageSources, listTables, overview, placeImages,
-  reportCounts, reportGroups, resolveReports, runConsoleQuery,
+  FEEDBACK_STATUSES, type FeedbackStatus, browse, feedbackCounts, feedbackList, imageRegions,
+  imageSources, listTables, overview, placeImages, reportCounts, reportGroups, resolveReports,
+  runConsoleQuery, setFeedbackStatus,
 } from './dashboard-data';
 import { dashboardPage, loginPage } from './dashboard-page';
 
@@ -119,6 +120,34 @@ export function buildDashboard(): Hono {
       return c.json({ error: 'bad_request', message: 'targetType 과 targetId 가 필요합니다.' }, 400);
     }
     const updated = await resolveReports(b.targetType, b.targetId, b.note ?? '');
+    return c.json({ updated });
+  });
+
+  // ── 피드백 운영(059) ──
+  dash.get('/api/feedback', async (c) => {
+    // 기본은 "새 것만". all 이면 상태를 가리지 않는다.
+    const rawStatus = c.req.query('status')?.trim() || 'new';
+    const status = rawStatus === 'all' ? undefined : rawStatus;
+    const category = c.req.query('category')?.trim() || undefined;
+    const limit = Number(c.req.query('limit') ?? 200) || 200;
+    const [counts, items] = await Promise.all([
+      feedbackCounts(),
+      feedbackList({ status, category, limit }),
+    ]);
+    return c.json({ counts, items });
+  });
+
+  //  ⚠️ 신고 판단(위)과 함께 대시보드의 쓰기 라우트다. 상태 칸 하나만 바꾼다.
+  dash.post('/api/feedback/status', async (c) => {
+    type StatusBody = { id?: number; status?: string };
+    const b: StatusBody = await c.req.json<StatusBody>().catch(() => ({} as StatusBody));
+    if (!Number.isInteger(b.id) || !FEEDBACK_STATUSES.includes(b.status as FeedbackStatus)) {
+      return c.json({
+        error: 'bad_request',
+        message: `id 와 status(${FEEDBACK_STATUSES.join(' · ')})가 필요합니다.`,
+      }, 400);
+    }
+    const updated = await setFeedbackStatus(b.id!, b.status as FeedbackStatus);
     return c.json({ updated });
   });
 
