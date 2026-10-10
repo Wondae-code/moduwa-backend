@@ -31,6 +31,15 @@ const DAY_TEMPLATE = [
 ] as const;
 type Slot = (typeof DAY_TEMPLATE)[number];
 
+/**
+ * 볼거리 칸을 앞에서부터 `spots` 개만 남긴 템플릿. 식사·카페는 그대로다.
+ * 줄이면 저녁 뒤 볼거리 → 점심 뒤 두 번째 순으로 빠진다 — 2 면 하루가 8칸에서 6칸이 된다.
+ */
+function dayTemplate(spots: number): Slot[] {
+  let n = 0;
+  return DAY_TEMPLATE.filter((slot) => slot !== 'spot' || n++ < spots);
+}
+
 // TourAPI contenttypeid — 12 관광지 / 14 문화시설 / 15 축제 / 28 레포츠 / 32 숙박 / 38 쇼핑 / 39 음식
 const SPOT_TYPES = ['12', '14', '15', '28'];
 const FESTIVAL_TYPE = '15';
@@ -110,7 +119,9 @@ export type RecommendInput = {
   budget?: 'low' | 'medium' | 'high';
   dayTripOnly?: boolean;
   /**
-   * 시안 4/6 "덜 붐볐으면 좋겠어요". 혼잡일 감점·한산일 보너스의 **세기를 키운다.**
+   * 시안 4/6 "덜 붐볐으면 좋겠어요". 두 가지를 한다 —
+   *  ① 혼잡일 감점·한산일 보너스의 **세기를 키운다**(혼잡도를 아는 날·장소에만 걸린다).
+   *  ② **하루 볼거리 칸을 줄인다**(dayTemplate). 이쪽은 날짜·지역과 상관없이 늘 걸린다.
    * 기본(false·미전송)은 지금 동작 그대로다 — 혼잡도를 아예 무시하는 것이 아니라,
    * 사용자가 명시적으로 고르면 더 강하게 반영한다.
    */
@@ -473,6 +484,12 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
   const distCap = onFoot ? (w.get('mobility.foot_distance_cap') ?? 80) : (w.get('mobility.distance_cap') ?? 30);
   const party = (input.party ?? []).filter((p): p is PartyKind => PARTY_KINDS.has(p));
   const avoid = input.avoidCrowds === true;
+  // 「덜 붐볐으면」 은 하루를 가볍게 한다 — 볼거리 칸을 줄인다(평소 4칸).
+  //  ⚠️ **혼잡도가 없는 날에도 줄인다.** 혼잡도는 4주치뿐이고 전남·광주는 아예 없어서, 혼잡도에만
+  //     기대던 이 선택은 그 날짜·지역에서 결과를 하나도 바꾸지 못했다(2026-10-10 실측: 12월 주말·
+  //     여수·목포·순천에서 바뀐 항목 0%). 고른 사람은 붐비는 곳을 피하는 것과 함께 덜 북적이게
+  //     다니고 싶은 것이고, 그건 혼잡도를 몰라도 들어줄 수 있다.
+  const template = avoid ? dayTemplate(w.get('congestion.avoid_spots_per_day') ?? 2) : DAY_TEMPLATE;
   const notes: RecommendNote[] = [];
 
   const all = await collectCandidates(region, party, input.themes ?? [], w);
@@ -561,7 +578,7 @@ export async function recommend(input: RecommendInput): Promise<RecommendResult 
     //  코스가 단조로워지고, 명세 3번이 경계한 "경쟁 목록처럼 보이는" 문제와 같은 성질이다.
     const typesToday = new Map<string, number>();
 
-    for (const slot of DAY_TEMPLATE) {
+    for (const slot of template) {
       const pick = all
         .filter((c) => !used.has(c.contentid) && !usedNames.has(c.norm_name) && fitsSlot(c, slot))
         .filter((c) => !closedOn.get(c.contentid)?.has(dow))   // 휴무일 제외
