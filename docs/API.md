@@ -983,7 +983,7 @@ curl -X POST "$BASE/v1/reviews/images" \
 | `themes` | | `GET /v1/plan-options`의 테마 코드. 목록 밖은 **400** |
 | `budget` | | `low`·`medium`·`high` — 숙소 가격대 |
 | `dayTripOnly` | | `true`면 숙소를 고르지 않음 |
-| `avoidCrowds` | | `true`면 혼잡일 회피를 **더 세게** 반영하고, **하루 볼거리를 4칸에서 2칸으로 줄인다**(날짜·지역과 상관없이). 미전송·`false`는 기존 동작 그대로 |
+| `avoidCrowds` | | `true`면 혼잡일 회피를 **더 세게** 반영. 미전송·`false`는 기존 동작 그대로 |
 
 ```json
 {
@@ -1002,10 +1002,6 @@ curl -X POST "$BASE/v1/reviews/images" \
 ```
 
 **하루 템플릿(`slot`)** — 명세 3번: `meal_morning` · `spot` · `meal_lunch` · `spot` · `spot` · `cafe` · `meal_dinner` · `spot`
-
-`avoidCrowds`면 볼거리가 앞에서부터 2칸만 남아 하루 6칸이 된다 — 점심 뒤 두 번째와 저녁 뒤
-볼거리가 빠진다(`recommend_weights`의 `congestion.avoid_spots_per_day`). 칸 수가 하루 8개로
-고정이라고 가정하지 말 것 — `thin_pool`일 때도 칸이 빈다.
 
 식사 자리는 카카오 세부 분류로 시간대를 맞춥니다 — 아침엔 해장국·죽·베이커리, 저녁엔
 고기·해물 쪽이 올라옵니다. 어긋나도 **거르지는 않고 점수만 밉니다**(후보가 적은 지역에서
